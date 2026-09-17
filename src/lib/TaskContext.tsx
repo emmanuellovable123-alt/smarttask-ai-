@@ -50,14 +50,20 @@ export function TaskProvider({ user, children }: { user: User; children: ReactNo
     }
     
     // Fallback to local storage for test mode if Supabase fails
-    const data = localStorage.getItem('daily_task_tasks');
-    const localTasks: Task[] = data ? JSON.parse(data) : [];
-    setTasks(localTasks.filter(t => t.userId === user.id));
-    setLoading(false);
+    try {
+      const data = localStorage.getItem('daily_task_tasks');
+      const localTasks: Task[] = data ? JSON.parse(data) : [];
+      setTasks(localTasks.filter(t => t.userId === user.id));
+    } catch (e) {
+      console.error("Local storage error:", e);
+      setTasks([]);
+    } finally {
+      setLoading(false);
+    }
   };
 
   useEffect(() => {
-    refreshTasks();
+    refreshTasks().catch(err => console.error("Unhandled rejection in refreshTasks:", err));
   }, [user.id]);
 
   const saveTask = async (task: Task) => {

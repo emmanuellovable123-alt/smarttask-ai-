@@ -123,10 +123,37 @@ function playBeepSequence(ctx: AudioContext, vol: number, beeps: {f: number, sta
   scheduleBeeps(ctx.currentTime);
 }
 
-export async function playAlarmSound(type: 'classic' | 'strong' | 'urgent' | 'custom', volume: number) {
+let vibrationInterval: number | null = null;
+
+function startVibration() {
+  if (typeof navigator !== 'undefined' && 'vibrate' in navigator) {
+    navigator.vibrate([1000, 1000]);
+    vibrationInterval = window.setInterval(() => {
+      navigator.vibrate([1000, 1000]);
+    }, 2000);
+  }
+}
+
+function stopVibration() {
+  if (vibrationInterval !== null) {
+    clearInterval(vibrationInterval);
+    vibrationInterval = null;
+  }
+  if (typeof navigator !== 'undefined' && 'vibrate' in navigator) {
+    navigator.vibrate(0);
+  }
+}
+
+export async function playAlarmSound(type: 'native' | 'classic' | 'strong' | 'urgent' | 'custom', volume: number, enableVibration: boolean = true) {
   stopAudio();
   
-  if (type === 'custom') {
+  if (enableVibration) {
+    startVibration();
+  }
+
+  if (type === 'native') {
+    playSyntheticSound('strong', volume);
+  } else if (type === 'custom') {
     try {
       const blob = await getCustomAudioBlob();
       if (blob) {
@@ -148,6 +175,7 @@ export async function playAlarmSound(type: 'classic' | 'strong' | 'urgent' | 'cu
 }
 
 export function stopAudio() {
+  stopVibration();
   if (activeAudio) {
     activeAudio.pause();
     activeAudio.currentTime = 0;

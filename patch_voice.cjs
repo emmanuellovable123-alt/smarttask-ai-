@@ -1,4 +1,6 @@
-import { useState, useRef, useEffect } from 'react';
+const fs = require('fs');
+
+const code = `import { useState, useRef, useEffect } from 'react';
 import { User, Task } from '../types';
 import { useTasks } from '../lib/TaskContext';
 import { motion, AnimatePresence } from 'motion/react';
@@ -80,14 +82,9 @@ export function VoiceTaskModal({ user, onClose, onSaved }: { user: User, onClose
   const startListening = async () => {
     console.log("Microphone permission requested");
     try {
-      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        console.warn("navigator.mediaDevices.getUserMedia not supported in this browser.");
-      } else {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        console.log("Microphone permission granted");
-        stream.getTracks().forEach(track => track.stop());
-      }
-      
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      console.log("Microphone permission granted");
+      stream.getTracks().forEach(track => track.stop());
     } catch (err) {
       console.error("Microphone permission denied", err);
       setClarificationMsg("Microphone permission is required to use Speak Task. Please allow microphone access and try again.");
@@ -337,3 +334,6 @@ export function VoiceTaskModal({ user, onClose, onSaved }: { user: User, onClose
     </AnimatePresence>
   );
 }
+`
+
+fs.writeFileSync('src/components/VoiceTaskModal.tsx', code);

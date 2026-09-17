@@ -25,26 +25,35 @@ const AndroidWrapper = {
   },
   scheduleAlarm(id: string, timeMs: number, title: string, message: string) {
     if (this.isAvailable) {
-      (window as any).AndroidAlarmManager.scheduleAlarm(id, timeMs, title, message);
+      const maybePromise = (window as any).AndroidAlarmManager.scheduleAlarm(id, timeMs, title, message);
+      if (maybePromise && typeof maybePromise.catch === 'function') maybePromise.catch((e: any) => console.error(e));
       return true;
     }
     return false;
   },
   cancelAlarm(id: string) {
     if (this.isAvailable) {
-      (window as any).AndroidAlarmManager.cancelAlarm(id);
+      const maybePromise = (window as any).AndroidAlarmManager.cancelAlarm(id);
+      if (maybePromise && typeof maybePromise.catch === 'function') maybePromise.catch((e: any) => console.error(e));
       return true;
     }
     return false;
   },
-  syncSettings(soundType: string, volume: number, customFileName: string | null) {
+  syncSettings(soundType: string, volume: number, customFileName: string | null, vibrate: boolean) {
     if (this.isAvailable) {
-      (window as any).AndroidAlarmManager.syncSettings(soundType, volume, customFileName || '');
+      if ((window as any).AndroidAlarmManager.syncSettings.length >= 4) {
+        const maybePromise = (window as any).AndroidAlarmManager.syncSettings(soundType, volume, customFileName || '', vibrate);
+      if (maybePromise && typeof maybePromise.catch === 'function') maybePromise.catch((e: any) => console.error(e));
+      } else {
+        const maybePromise = (window as any).AndroidAlarmManager.syncSettings(soundType, volume, customFileName || '');
+      if (maybePromise && typeof maybePromise.catch === 'function') maybePromise.catch((e: any) => console.error(e));
+      }
     }
   },
   stopAlarm() {
     if (this.isAvailable && (window as any).AndroidAlarmManager.stopAlarm) {
-      (window as any).AndroidAlarmManager.stopAlarm();
+      const maybePromise = (window as any).AndroidAlarmManager.stopAlarm();
+      if (maybePromise && typeof maybePromise.catch === 'function') maybePromise.catch((e: any) => console.error(e));
     }
   }
 };
@@ -64,9 +73,9 @@ export const ReminderService = {
     }
   },
   
-  async syncAlarmSettings(soundType: string, volume: number) {
+  async syncAlarmSettings(soundType: string, volume: number, vibrate: boolean) {
     const customName = await getCustomAudioName();
-    AndroidWrapper.syncSettings(soundType, volume, customName);
+    AndroidWrapper.syncSettings(soundType, volume, customName, vibrate);
   },
 
   scheduleReminder(task: Task, triggerTimeMs: number) {

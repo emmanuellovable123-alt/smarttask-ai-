@@ -4,7 +4,8 @@ import App from './App.tsx';
 import './index.css';
 
 window.addEventListener('unhandledrejection', (event) => {
-  console.error('Unhandled promise rejection:', event.reason);
+  console.warn('Suppressed global promise rejection:', event.reason || event);
+  event.preventDefault();
 });
 
 window.addEventListener('error', (event) => {

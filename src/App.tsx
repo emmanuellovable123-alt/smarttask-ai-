@@ -61,9 +61,13 @@ export default function App() {
   };
 
   const handleUpdateUser = async (updatedUser: User) => {
-    setUser(updatedUser);
-    store.setCurrentUser(updatedUser);
-    store.updateUser(updatedUser);
+    try {
+      setUser(updatedUser);
+      store.setCurrentUser(updatedUser);
+      store.updateUser(updatedUser);
+    } catch (e) {
+      console.error(e);
+    }
   };
 
   return (

@@ -33,7 +33,8 @@ export interface User {
   subscriptionStatus: string;
   
   // Alarm Settings
-  alarmSoundType?: 'classic' | 'strong' | 'urgent' | 'custom';
+  alarmSoundType?: 'native' | 'classic' | 'strong' | 'urgent' | 'custom';
   alarmSoundReference?: string | null;
   alarmVolume?: number; // 0-100
+  alarmVibrationEnabled?: boolean;
 }

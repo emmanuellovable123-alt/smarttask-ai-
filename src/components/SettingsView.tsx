@@ -5,8 +5,9 @@ import { supabase, hasSupabaseKeys } from '../lib/supabase';
 import { saveCustomAudio, getCustomAudioName, playAlarmSound, stopAudio } from '../lib/audioManager';
 
 export function SettingsView({ user, onLogout, onUpdateUser }: { user: User, onLogout: () => void, onUpdateUser: (u: User) => void }) {
-  const [soundType, setSoundType] = useState(user.alarmSoundType || 'strong');
+  const [soundType, setSoundType] = useState(user.alarmSoundType || 'native');
   const [volume, setVolume] = useState(user.alarmVolume ?? 75);
+  const [vibrationEnabled, setVibrationEnabled] = useState(user.alarmVibrationEnabled ?? true);
   const [customName, setCustomName] = useState<string | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
@@ -63,7 +64,7 @@ export function SettingsView({ user, onLogout, onUpdateUser }: { user: User, onL
     } else {
       setIsPlaying(true);
       try {
-        await playAlarmSound(soundType as any, volume);
+        await playAlarmSound(soundType as any, volume, vibrationEnabled);
         // Auto-stop preview after 5 seconds to prevent annoyance
         setTimeout(() => {
           stopAudio();
@@ -83,32 +84,51 @@ export function SettingsView({ user, onLogout, onUpdateUser }: { user: User, onL
     };
   }, []);
 
-  const handleSaveSettings = async () => {
-    setIsSaving(true);
-    const updatedUser = {
-      ...user,
-      alarmSoundType: soundType as any,
-      alarmVolume: volume
-    };
-    
-    // Save to App state and localStorage
-    onUpdateUser(updatedUser);
-    
-    // Attempt Supabase save
-    if (hasSupabaseKeys) {
-      try {
-        // Only sending standard fields to avoid breaking if alarm columns missing in DB
-        // since we don't have schema guarantees for the new columns in Supabase
-        await supabase.from('profiles').update({
-           alarm_sound_type: soundType,
-           alarm_volume: volume
-        }).eq('id', user.id);
-      } catch (err) {
-        // Ignore DB update errors since it's saved locally
-      }
+  const handleVibrationChange = async (enabled: boolean) => {
+    try {
+      setVibrationEnabled(enabled);
+      const updatedUser = {
+        ...user,
+        alarmSoundType: soundType as any,
+        alarmVolume: volume,
+        alarmVibrationEnabled: enabled
+      };
+      await onUpdateUser(updatedUser);
+    } catch (err) {
+      console.error(err);
     }
-    
-    setTimeout(() => setIsSaving(false), 500);
+  };
+
+  const handleSaveSettings = async () => {
+    try {
+      setIsSaving(true);
+      const updatedUser = {
+        ...user,
+        alarmSoundType: soundType as any,
+        alarmVolume: volume,
+        alarmVibrationEnabled: vibrationEnabled
+      };
+      
+      // Save to App state and localStorage
+      await onUpdateUser(updatedUser);
+      
+      // Attempt Supabase save
+      if (hasSupabaseKeys) {
+        try {
+          await supabase.from('profiles').update({ 
+             alarm_sound_type: soundType,
+             alarm_volume: volume,
+             alarm_vibration_enabled: vibrationEnabled
+          }).eq('id', user.id);
+        } catch (err) {
+          // Ignore DB update errors since it's saved locally
+        }
+      }
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setTimeout(() => setIsSaving(false), 500);
+    }
   };
 
   return (
@@ -159,7 +179,7 @@ export function SettingsView({ user, onLogout, onUpdateUser }: { user: User, onL
               </div>
               
               <div className="space-y-2 mb-4">
-                {['classic', 'strong', 'urgent', 'custom'].map((type) => (
+                {['native', 'classic', 'strong', 'urgent', 'custom'].map((type) => (
                   <label key={type} className="flex items-center gap-3 p-3 rounded-xl hover:bg-slate-50 cursor-pointer border border-transparent has-[:checked]:border-indigo-100 has-[:checked]:bg-indigo-50/30 transition-colors">
                     <input 
                       type="radio" 
@@ -170,6 +190,7 @@ export function SettingsView({ user, onLogout, onUpdateUser }: { user: User, onL
                       className="w-4 h-4 text-indigo-600 focus:ring-indigo-600"
                     />
                     <span className="flex-1 font-medium text-slate-700 capitalize">
+                      {type === 'native' && 'Native Alarm Clock Ringtone'}
                       {type === 'classic' && 'Classic Wake'}
                       {type === 'strong' && 'Strong Wake'}
                       {type === 'urgent' && 'Urgent Wake'}
@@ -222,6 +243,24 @@ export function SettingsView({ user, onLogout, onUpdateUser }: { user: User, onL
                     className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-indigo-600"
                   />
                 </div>
+              </div>
+
+              <div className="flex items-center justify-between mt-4 pt-4 border-t border-slate-100">
+                <div className="flex items-center gap-3">
+                  <div className="p-2 bg-indigo-50 text-indigo-600 rounded-lg">
+                    <Bell className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <p className="font-semibold text-slate-900">Vibrate During Alarm</p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => handleVibrationChange(!vibrationEnabled)}
+                  className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none ${vibrationEnabled ? 'bg-indigo-600' : 'bg-slate-200'}`}
+                >
+                  <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${vibrationEnabled ? 'translate-x-6' : 'translate-x-1'}`} />
+                </button>
               </div>
               
               <div className="flex items-center gap-3 mt-6">

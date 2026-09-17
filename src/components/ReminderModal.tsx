@@ -32,10 +32,11 @@ export function ReminderModal({
   
   useEffect(() => {
     // Start continuous alarm sound
-    const soundType = user?.alarmSoundType || 'strong';
+    const soundType = user?.alarmSoundType || 'native';
     const volume = user?.alarmVolume ?? 75;
+    const vibrate = user?.alarmVibrationEnabled ?? true;
     
-    playAlarmSound(soundType, volume).catch(err => {
+    playAlarmSound(soundType as any, volume, vibrate).catch(err => {
       console.warn("Failed to play alarm sound automatically", err);
     });
     
