@@ -4,12 +4,15 @@ export function parseTaskDateTime(dateStr: string, timeStr: string): number | nu
   const now = new Date(getNow());
   let targetDate = new Date(now);
 
-  const d = dateStr.toLowerCase();
+  const d = dateStr.toLowerCase().trim();
   
   if (d === 'tomorrow') {
     targetDate.setDate(targetDate.getDate() + 1);
   } else if (d === 'next week') {
     targetDate.setDate(targetDate.getDate() + 7);
+  } else if (d.match(/^\d{4}-\d{2}-\d{2}$/)) {
+    const [y, m, day] = d.split('-').map(Number);
+    targetDate = new Date(y, m - 1, day);
   } else if (d.match(/^[a-z]+day$/)) { // e.g. "monday", "tuesday"
     const days = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
     const targetDay = days.indexOf(d);
@@ -21,18 +24,20 @@ export function parseTaskDateTime(dateStr: string, timeStr: string): number | nu
     }
   }
 
-  // Parse time (e.g. "18:00" or "6:00 PM" or "6 PM")
+  // Parse time (e.g. "18:00" or "6:00 PM" or "6 PM" or "7:00 p.m.")
   let hours = 0;
   let minutes = 0;
   
-  // Try 24h format first "HH:MM" or "HH:MM:SS"
-  const timeMatch24 = timeStr.match(/^(\d{1,2}):(\d{2})/);
-  const timeMatch12 = timeStr.match(/^(\d{1,2})(?::(\d{2}))?\s*(am|pm)/i);
+  const cleanTime = timeStr.trim();
+  // Try 12h format first with optional minutes and optional periods in am/pm
+  const timeMatch12 = cleanTime.match(/^(\d{1,2})(?::(\d{2}))?\s*(am|pm|a\.m\.|p\.m\.)/i);
+  // Try 24h format "HH:MM" or "HH:MM:SS"
+  const timeMatch24 = cleanTime.match(/^(\d{1,2}):(\d{2})/);
 
   if (timeMatch12) {
     hours = parseInt(timeMatch12[1], 10);
     minutes = timeMatch12[2] ? parseInt(timeMatch12[2], 10) : 0;
-    const ampm = timeMatch12[3].toLowerCase();
+    const ampm = timeMatch12[3].toLowerCase().replace(/\./g, '');
     if (ampm === 'pm' && hours < 12) hours += 12;
     if (ampm === 'am' && hours === 12) hours = 0;
   } else if (timeMatch24) {

@@ -29,6 +29,7 @@ export function VoiceTaskModal({ user, onClose, onSaved }: { user: User, onClose
   const transcriptRef = useRef<string>('');
   const taskInputRef = useRef<string>('');
   const voiceStateRef = useRef<VoiceState>('idle');
+  const isSubmittingRef = useRef<boolean>(false);
 
   useEffect(() => {
     voiceStateRef.current = voiceState;
@@ -44,43 +45,57 @@ export function VoiceTaskModal({ user, onClose, onSaved }: { user: User, onClose
         recognitionRef.current.interimResults = true;
 
         recognitionRef.current.onresult = (event: any) => {
-          let currentTranscript = '';
-          for (let i = event.resultIndex; i < event.results.length; ++i) {
-            currentTranscript += event.results[i][0].transcript;
+          let fullTranscript = '';
+          for (let i = 0; i < event.results.length; ++i) {
+            fullTranscript += event.results[i][0].transcript;
           }
-          setTranscript(currentTranscript);
-          setTaskInput(currentTranscript);
-          transcriptRef.current = currentTranscript;
-          taskInputRef.current = currentTranscript;
+          const trimmed = fullTranscript.trim();
+          console.log("[VoiceTaskModal] Speech recognized:", trimmed);
+          setTranscript(trimmed);
+          setTaskInput(trimmed);
+          transcriptRef.current = trimmed;
+          taskInputRef.current = trimmed;
         };
 
         recognitionRef.current.onerror = (event: any) => {
-          console.error('Speech recognition error:', event.error);
+          console.error('[VoiceTaskModal] Speech recognition error:', event.error);
           if (event.error === 'not-allowed') {
             setClarificationMsg("Microphone permission is required to use Speak Task. Please allow microphone access and try again.");
+            voiceStateRef.current = 'error';
             setVoiceState('error');
           } else if (event.error === 'no-speech') {
-            console.warn("No speech detected");
-            setVoiceState('idle');
+            console.warn("[VoiceTaskModal] No speech detected");
+            if (!taskInputRef.current && !transcriptRef.current) {
+              voiceStateRef.current = 'idle';
+              setVoiceState('idle');
+            }
           } else {
             setClarificationMsg("Speech recognition error: " + event.error);
+            voiceStateRef.current = 'error';
             setVoiceState('error');
           }
         };
 
         recognitionRef.current.onend = () => {
-          console.log("Speech recognition ended. Final transcript:", transcriptRef.current);
+          console.log("[VoiceTaskModal] Speech recognition ended. Current transcript:", transcriptRef.current);
+          if (isSubmittingRef.current) {
+            return;
+          }
           if (voiceStateRef.current === 'listening') {
-            const finalSpeech = transcriptRef.current.trim();
+            const finalSpeech = (taskInputRef.current || transcriptRef.current).trim();
             if (finalSpeech) {
               handleTaskSubmit(finalSpeech);
             } else {
+              voiceStateRef.current = 'idle';
               setVoiceState('idle');
             }
           }
         };
       }
     }
+
+    // Auto-start listening on mount when modal opens from "Tap to Speak Task"
+    startListening();
 
     return () => {
       if (recognitionRef.current) {
@@ -96,24 +111,26 @@ export function VoiceTaskModal({ user, onClose, onSaved }: { user: User, onClose
   }, []);
 
   const startListening = async () => {
-    console.log("Microphone permission requested");
+    console.log("[VoiceTaskModal] Microphone requested");
     try {
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
         console.warn("navigator.mediaDevices.getUserMedia not supported in this browser.");
       } else {
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        console.log("Microphone permission granted");
+        console.log("[VoiceTaskModal] Microphone permission granted");
         stream.getTracks().forEach(track => track.stop());
       }
     } catch (err) {
-      console.error("Microphone permission denied", err);
-      setClarificationMsg("Microphone permission is required to use Speak Task. Please allow microphone access and try again.");
+      console.error("[VoiceTaskModal] Microphone permission denied", err);
+      setClarificationMsg("Microphone permission is required to use Speak Task. Please allow microphone access or type your task below.");
+      voiceStateRef.current = 'error';
       setVoiceState('error');
       return;
     }
 
     if (!recognitionRef.current) {
       setClarificationMsg("Speech recognition is not supported in this browser. You can type your task below.");
+      voiceStateRef.current = 'error';
       setVoiceState('error');
       return;
     }
@@ -122,8 +139,9 @@ export function VoiceTaskModal({ user, onClose, onSaved }: { user: User, onClose
     setTaskInput('');
     transcriptRef.current = '';
     taskInputRef.current = '';
+    voiceStateRef.current = 'listening';
     setVoiceState('listening');
-    console.log("Speech recognition started");
+    console.log("[VoiceTaskModal] Speech recognition started");
     try {
       recognitionRef.current.start();
     } catch (e) {
@@ -132,8 +150,15 @@ export function VoiceTaskModal({ user, onClose, onSaved }: { user: User, onClose
   };
 
   const handleTaskSubmit = async (overrideText?: string) => {
-    // If voice recognition is currently running, stop it to prevent overlapping events
-    if (voiceStateRef.current === 'listening' && recognitionRef.current) {
+    // Prevent overlapping simultaneous submissions
+    if (isSubmittingRef.current) {
+      console.log("[VoiceTaskModal] Already submitting, ignoring duplicate trigger");
+      return;
+    }
+    isSubmittingRef.current = true;
+
+    // If voice recognition is currently running, stop it cleanly
+    if (recognitionRef.current) {
       try {
         recognitionRef.current.stop();
       } catch (e) {
@@ -141,22 +166,27 @@ export function VoiceTaskModal({ user, onClose, onSaved }: { user: User, onClose
       }
     }
 
-    // Always use the latest available text (override argument, ref, or state)
-    const textToProcess = (typeof overrideText === 'string' 
-      ? overrideText 
-      : (taskInputRef.current || taskInput || transcriptRef.current || transcript)
+    // Always resolve the freshest available text (override argument, refs, or state)
+    const textToProcess = (
+      (typeof overrideText === 'string' && overrideText.trim())
+        ? overrideText
+        : (taskInputRef.current || transcriptRef.current || taskInput || transcript)
     ).trim();
 
     console.log("[VoiceTaskModal] handleTaskSubmit called with text:", textToProcess);
 
     // Empty input validation - do not call API unnecessarily
     if (!textToProcess) {
-      setClarificationMsg("Please enter or speak a task first.");
+      isSubmittingRef.current = false;
+      voiceStateRef.current = 'clarifying';
       setVoiceState('clarifying');
+      setClarificationMsg("Please enter or speak a task first.");
       return;
     }
 
+    voiceStateRef.current = 'processing';
     setVoiceState('processing');
+
     try {
       const res = await fetch('/api/parse-task', {
         method: 'POST',
@@ -168,30 +198,74 @@ export function VoiceTaskModal({ user, onClose, onSaved }: { user: User, onClose
         })
       });
 
+      if (!res.ok) {
+        throw new Error(`Server returned HTTP ${res.status}`);
+      }
+
       const data: ParsedTaskData = await res.json();
       console.log("[VoiceTaskModal] parse-task response:", data);
 
       if (data.error) {
         setParsedData({ error: data.error });
         setClarificationMsg("I couldn't clearly understand that task. Please include what you want to do and the time.");
-        setVoiceState('clarifying');
-      } else if (data.missingTask) {
-        setParsedData(data);
-        setClarificationMsg("What task do you want to be reminded about?");
-        setVoiceState('clarifying');
-      } else if (data.missingTime) {
-        setParsedData(data);
-        setClarificationMsg("What's the reminder time?");
+        voiceStateRef.current = 'clarifying';
         setVoiceState('clarifying');
       } else {
-        setParsedData(data);
-        setVoiceState('confirming');
+        // Contextual clarification merging: if user previously had task or time, merge missing fields
+        let resolvedTask = data.task || "";
+        let resolvedDate = data.date || "Today";
+        let resolvedTime = data.time || "";
+        let resolvedRecurrence = data.recurrenceRule || null;
+        let isMissingTask = Boolean(data.missingTask);
+        let isMissingTime = Boolean(data.missingTime);
+
+        if (parsedData) {
+          if (isMissingTask && parsedData.task) {
+            resolvedTask = parsedData.task;
+            isMissingTask = false;
+          }
+          if (isMissingTime && parsedData.time) {
+            resolvedTime = parsedData.time;
+            isMissingTime = false;
+          }
+          if (!resolvedRecurrence && parsedData.recurrenceRule) {
+            resolvedRecurrence = parsedData.recurrenceRule;
+          }
+        }
+
+        const mergedData: ParsedTaskData = {
+          task: resolvedTask,
+          date: resolvedDate,
+          time: resolvedTime,
+          recurrenceRule: resolvedRecurrence,
+          missingTask: isMissingTask,
+          missingTime: isMissingTime
+        };
+
+        if (isMissingTask) {
+          setParsedData(mergedData);
+          setClarificationMsg("What task do you want to be reminded about?");
+          voiceStateRef.current = 'clarifying';
+          setVoiceState('clarifying');
+        } else if (isMissingTime) {
+          setParsedData(mergedData);
+          setClarificationMsg("What's the reminder time?");
+          voiceStateRef.current = 'clarifying';
+          setVoiceState('clarifying');
+        } else {
+          setParsedData(mergedData);
+          voiceStateRef.current = 'confirming';
+          setVoiceState('confirming');
+        }
       }
     } catch (err) {
       console.error("[VoiceTaskModal] Failed to parse task:", err);
       setParsedData({ error: "Failed to parse." });
-      setClarificationMsg("I couldn't clearly understand that task.");
+      setClarificationMsg("I couldn't clearly understand that task. Please try typing it below.");
+      voiceStateRef.current = 'clarifying';
       setVoiceState('clarifying');
+    } finally {
+      isSubmittingRef.current = false;
     }
   };
 
@@ -356,7 +430,8 @@ export function VoiceTaskModal({ user, onClose, onSaved }: { user: User, onClose
                 <div className="flex gap-2">
                   <input 
                     type="text"
-                    className="flex-1 px-4 py-2.5 text-sm rounded-xl bg-slate-50 border border-slate-200 focus:border-blue-500 focus:bg-white outline-none transition-all"
+                    disabled={voiceState === 'processing'}
+                    className="flex-1 px-4 py-2.5 text-sm rounded-xl bg-slate-50 border border-slate-200 focus:border-blue-500 focus:bg-white outline-none transition-all disabled:opacity-60"
                     placeholder="e.g. Remind me to study at 7 PM today"
                     value={taskInput}
                     onChange={(e) => {
@@ -367,7 +442,7 @@ export function VoiceTaskModal({ user, onClose, onSaved }: { user: User, onClose
                       transcriptRef.current = val;
                     }}
                     onKeyDown={(e) => {
-                      if (e.key === 'Enter') {
+                      if (e.key === 'Enter' && voiceState !== 'processing') {
                         e.preventDefault();
                         handleTaskSubmit();
                       }
@@ -375,7 +450,8 @@ export function VoiceTaskModal({ user, onClose, onSaved }: { user: User, onClose
                   />
                   <button 
                     onClick={() => handleTaskSubmit()} 
-                    className="bg-blue-600 text-white px-4 py-2.5 rounded-xl text-sm font-semibold hover:bg-blue-700 active:scale-95 transition-all flex items-center gap-1.5 shadow-sm"
+                    disabled={voiceState === 'processing'}
+                    className="bg-blue-600 text-white px-4 py-2.5 rounded-xl text-sm font-semibold hover:bg-blue-700 active:scale-95 transition-all flex items-center gap-1.5 shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     <span>Send</span>
                     <Send className="w-4 h-4" />
