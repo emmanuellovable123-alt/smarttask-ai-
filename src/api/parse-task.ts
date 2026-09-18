@@ -1,4 +1,4 @@
-import { processTaskInput } from "../src/lib/taskParsingEngine.ts";
+import { processTaskInput } from "../lib/taskParsingEngine";
 
 export default async function handler(req: any, res: any) {
   // CORS configuration

@@ -4,6 +4,7 @@ import { useTasks } from '../lib/TaskContext';
 import { motion, AnimatePresence } from 'motion/react';
 import { X } from 'lucide-react';
 import { getUserTimezone } from '../lib/dateUtils';
+import { parseMultiTaskFallback } from '../lib/taskParsingEngine';
 
 export function ManualTaskModal({ user, editTask, onClose, onSaved }: { user: User, editTask?: Task, onClose: () => void, onSaved: () => void }) {
   const { saveTask, updateTask } = useTasks();
@@ -19,16 +20,63 @@ export function ManualTaskModal({ user, editTask, onClose, onSaved }: { user: Us
     }
   }, [editTask]);
 
+  // If user enters natural language like "Go to the gym at 6 PM today", auto-extract date and time on blur
+  const handleTaskBlur = () => {
+    if (!editTask && taskText.trim()) {
+      const parsed = parseMultiTaskFallback(taskText);
+      if (parsed.success && parsed.tasks.length > 0) {
+        const first = parsed.tasks[0];
+        if (first.task && first.task !== taskText) {
+          setTaskText(first.task);
+          if (first.date && (!date || date === 'Today')) {
+            setDate(first.date);
+          }
+          if (first.time && !time) {
+            // Convert e.g. "6:00 PM" to "18:00" for standard time input if applicable
+            const m = first.time.match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
+            if (m) {
+              let h = parseInt(m[1], 10);
+              const min = m[2];
+              const ampm = m[3].toUpperCase();
+              if (ampm === 'PM' && h < 12) h += 12;
+              if (ampm === 'AM' && h === 12) h = 0;
+              setTime(`${String(h).padStart(2, '0')}:${min}`);
+            } else {
+              setTime(first.time);
+            }
+          }
+        }
+      }
+    }
+  };
+
   const handleSave = async () => {
     if (!taskText) return;
 
     try {
+      // Run the same parsing engine on typed text to extract any embedded date/time
+      let finalTaskText = taskText.trim();
+      let finalDate = date;
+      let finalTime = time;
+      let recurrenceRule: string | undefined = undefined;
+
+      if (!editTask) {
+        const parsed = parseMultiTaskFallback(taskText);
+        if (parsed.success && parsed.tasks.length > 0) {
+          const first = parsed.tasks[0];
+          if (first.task) finalTaskText = first.task;
+          if (!finalTime && first.time) finalTime = first.time;
+          if ((!finalDate || finalDate === 'Today') && first.date) finalDate = first.date;
+          if (first.recurrenceRule) recurrenceRule = first.recurrenceRule;
+        }
+      }
+
       if (editTask) {
         const updatedTask: Task = {
           ...editTask,
-          taskText,
-          scheduledDate: date,
-          scheduledTime: time,
+          taskText: finalTaskText,
+          scheduledDate: finalDate,
+          scheduledTime: finalTime,
           timezone: getUserTimezone(),
           snoozedUntil: null, // Reset snooze if edited
         };
@@ -44,10 +92,11 @@ export function ManualTaskModal({ user, editTask, onClose, onSaved }: { user: Us
         const newTask: Task = {
           id: crypto.randomUUID(),
           userId: user.id,
-          taskText,
-          scheduledDate: date,
-          scheduledTime: time,
+          taskText: finalTaskText,
+          scheduledDate: finalDate,
+          scheduledTime: finalTime,
           timezone: getUserTimezone(),
+          recurrenceRule,
           status: 'Pending',
           createdTimestamp: Date.now(),
           completedTimestamp: null,
@@ -94,6 +143,7 @@ export function ManualTaskModal({ user, editTask, onClose, onSaved }: { user: Us
                 placeholder="What do you want to accomplish?"
                 value={taskText}
                 onChange={(e) => setTaskText(e.target.value)}
+                onBlur={handleTaskBlur}
                 autoFocus
               />
             </div>

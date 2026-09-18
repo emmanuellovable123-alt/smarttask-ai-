@@ -1,159 +1,79 @@
+// src/lib/taskParsingEngine.ts
 import { GoogleGenAI, Type } from "@google/genai";
-
-export type TaskErrorCategory =
-  | 'AUTHENTICATION_ERROR'
-  | 'PERMISSION_ERROR'
-  | 'RATE_LIMIT_ERROR'
-  | 'API_REQUEST_ERROR'
-  | 'MODEL_ERROR'
-  | 'NETWORK_ERROR'
-  | 'RESPONSE_PARSE_ERROR'
-  | 'TASK_INTERPRETATION_ERROR';
-
-export interface TaskItem {
-  task: string;
-  date: string;
-  time: string;
-  recurrenceRule?: string | null;
-}
-
-export interface TaskEngineDiagnostic {
-  source: 'gemini' | 'fallback_parser';
-  modelAttempted?: string;
-  httpStatus?: number;
-  errorCategory?: TaskErrorCategory;
-  errorMessage?: string;
-  durationMs?: number;
-  rawResponseSnippet?: string;
-}
-
-export interface TaskEngineResult {
-  success: boolean;
-  tasks: TaskItem[];
-  totalFound: number;
-  hasMoreThanSeven: boolean;
-  rawTranscript: string;
-  diagnostic: TaskEngineDiagnostic;
-  errorCategory?: TaskErrorCategory;
-  message?: string;
-  // Legacy fields for backward compatibility
-  task?: string;
-  date?: string;
-  time?: string;
-  recurrenceRule?: string | null;
-  missingTask?: boolean;
-  missingTime?: boolean;
-}
-
-export function classifyGeminiError(err: any): { category: TaskErrorCategory; status: number; message: string; safeDetails: string } {
+function classifyGeminiError(err) {
   const status = Number(err?.status || err?.statusCode || 500);
-  const errMsg = String(err?.message || err || '');
-
-  // 1. Authentication
+  const errMsg = String(err?.message || err || "");
   if (status === 401 || /api[_\s]?key|unauthenticated|invalid\s*auth/i.test(errMsg)) {
     return {
-      category: 'AUTHENTICATION_ERROR',
+      category: "AUTHENTICATION_ERROR",
       status: 401,
-      message: 'Gemini API authentication failed. Please verify that GEMINI_API_KEY is configured in your environment variables.',
-      safeDetails: 'HTTP 401: Invalid or missing API key'
+      message: "Gemini API authentication failed. Please verify that GEMINI_API_KEY is configured in your environment variables.",
+      safeDetails: "HTTP 401: Invalid or missing API key"
     };
   }
-
-  // 2. Permission
   if (status === 403 || /permission_denied|forbidden|access_denied/i.test(errMsg)) {
     return {
-      category: 'PERMISSION_ERROR',
+      category: "PERMISSION_ERROR",
       status: 403,
-      message: 'Gemini API permission denied. Check that your Google Cloud / AI Studio project has access.',
-      safeDetails: 'HTTP 403: Permission denied'
+      message: "Gemini API permission denied. Check that your Google Cloud / AI Studio project has access.",
+      safeDetails: "HTTP 403: Permission denied"
     };
   }
-
-  // 3. Rate Limit / Quota
   if (status === 429 || /quota|rate[_\s]?limit|resource_exhausted/i.test(errMsg)) {
     return {
-      category: 'RATE_LIMIT_ERROR',
+      category: "RATE_LIMIT_ERROR",
       status: 429,
-      message: 'Gemini free-tier quota/rate limit exceeded. Tasks parsed using resilient local parser.',
-      safeDetails: 'HTTP 429: Resource exhausted / quota exceeded'
+      message: "Gemini free-tier quota/rate limit exceeded. Tasks parsed using resilient local parser.",
+      safeDetails: "HTTP 429: Resource exhausted / quota exceeded"
     };
   }
-
-  // 4. Model not found / unavailable
   if (status === 404 || /not_found|model.*no longer available/i.test(errMsg)) {
     return {
-      category: 'MODEL_ERROR',
+      category: "MODEL_ERROR",
       status: 404,
-      message: 'Requested Gemini model is unavailable or deprecated.',
-      safeDetails: 'HTTP 404: Model not found'
+      message: "Requested Gemini model is unavailable or deprecated.",
+      safeDetails: "HTTP 404: Model not found"
     };
   }
-
-  // 5. Malformed request / Bad Request
   if (status === 400 || /invalid_argument|bad\s*request/i.test(errMsg)) {
     return {
-      category: 'API_REQUEST_ERROR',
+      category: "API_REQUEST_ERROR",
       status: 400,
-      message: 'Malformed request structure sent to Gemini API.',
-      safeDetails: 'HTTP 400: Bad request'
+      message: "Malformed request structure sent to Gemini API.",
+      safeDetails: "HTTP 400: Bad request"
     };
   }
-
-  // 6. Network / Fetch connection error
   if (/fetch failed|enotfound|econnrefused|etimedout|network/i.test(errMsg)) {
     return {
-      category: 'NETWORK_ERROR',
+      category: "NETWORK_ERROR",
       status: 503,
-      message: 'Unable to reach Google Gemini servers. Check network connectivity.',
-      safeDetails: 'Network connectivity failure'
+      message: "Unable to reach Google Gemini servers. Check network connectivity.",
+      safeDetails: "Network connectivity failure"
     };
   }
-
-  // 7. Parse error
   if (/json|syntaxerror|unexpected token/i.test(errMsg)) {
     return {
-      category: 'RESPONSE_PARSE_ERROR',
+      category: "RESPONSE_PARSE_ERROR",
       status: 502,
-      message: 'Received response from Gemini but could not parse structured JSON output.',
-      safeDetails: 'JSON parsing failure'
+      message: "Received response from Gemini but could not parse structured JSON output.",
+      safeDetails: "JSON parsing failure"
     };
   }
-
   return {
-    category: 'API_REQUEST_ERROR',
+    category: "API_REQUEST_ERROR",
     status: status >= 400 && status < 600 ? status : 500,
-    message: errMsg.slice(0, 200) || 'Gemini API call failed',
+    message: errMsg.slice(0, 200) || "Gemini API call failed",
     safeDetails: `HTTP ${status}`
   };
 }
-
-/**
- * Normalizes speech recognition artifacts like repeated words ("go go to go to gym"),
- * smart quotes, and colloquial AM/PM variations.
- */
-export function normalizeTranscript(text: string): string {
+function normalizeTranscript(text) {
   if (!text) return "";
-  let normalized = text
-    .replace(/[\u2018\u2019]/g, "'")
-    .replace(/[\u201C\u201D]/g, '"')
-    .replace(/(\d{1,2}(?::\d{2})?)\s*p\.m\./gi, "$1 PM")
-    .replace(/(\d{1,2}(?::\d{2})?)\s*a\.m\./gi, "$1 AM")
-    .replace(/(\d{1,2}(?::\d{2})?)\s*pm\b/gi, "$1 PM")
-    .replace(/(\d{1,2}(?::\d{2})?)\s*am\b/gi, "$1 AM");
-
-  // Clean stutter word repetition e.g. "go go to go to gym" -> "go to go to gym"
+  let normalized = text.replace(/[\u2018\u2019]/g, "'").replace(/[\u201C\u201D]/g, '"').replace(/(\d{1,2}(?::\d{2})?)\s*p\.m\./gi, "$1 PM").replace(/(\d{1,2}(?::\d{2})?)\s*a\.m\./gi, "$1 AM").replace(/(\d{1,2}(?::\d{2})?)\s*pm\b/gi, "$1 PM").replace(/(\d{1,2}(?::\d{2})?)\s*am\b/gi, "$1 AM");
   normalized = normalized.replace(/\b(\w+)(?:\s+\1\b)+/gi, "$1");
-  // Clean phrase repetitions e.g. "go to go to gym" -> "go to gym"
   normalized = normalized.replace(/\b(go\s+to)\s+(go\s+to)\b/gi, "$1");
-
   return normalized.trim();
 }
-
-/**
- * Natural language multi-task parser (1 to 7 tasks) used as resilient local parser
- * when AI is offline, rate-limited, or recovering from connection spikes.
- */
-export function parseMultiTaskFallback(prompt: string): TaskEngineResult {
+function parseMultiTaskFallback(prompt) {
   const text = normalizeTranscript(prompt);
   if (!text) {
     return {
@@ -163,39 +83,25 @@ export function parseMultiTaskFallback(prompt: string): TaskEngineResult {
       hasMoreThanSeven: false,
       rawTranscript: "",
       diagnostic: {
-        source: 'fallback_parser',
-        errorCategory: 'TASK_INTERPRETATION_ERROR',
-        errorMessage: 'Empty input provided'
+        source: "fallback_parser",
+        errorCategory: "TASK_INTERPRETATION_ERROR",
+        errorMessage: "Empty input provided"
       },
-      errorCategory: 'TASK_INTERPRETATION_ERROR',
-      message: 'Please provide or speak a task first.',
+      errorCategory: "TASK_INTERPRETATION_ERROR",
+      message: "Please provide or speak a task first.",
       missingTask: true,
       missingTime: true
     };
   }
-
-  // Split into potential task sentences or compound clauses
-  const rawSegments = text.split(/(?:[.!?;]|\band\s+then\b|\bthen\b|\band\b|,\s*(?=[a-zA-Z0-9]))/i)
-    .map(s => s.trim())
-    .filter(s => s.length > 0);
-
-  const parsedTasks: TaskItem[] = [];
-
+  const rawSegments = text.split(/(?:[.!?;]|\band\s+then\b|\bthen\b|\band\b|,\s*(?=[a-zA-Z0-9]))/i).map((s) => s.trim()).filter((s) => s.length > 0);
+  const parsedTasks = [];
   for (const rawChunk of rawSegments) {
     if (parsedTasks.length >= 7) break;
-
-    // Clean stutter artifacts in chunk
-    let chunk = rawChunk
-      .replace(/\b(\w+)(?:\s+\1\b)+/gi, "$1")
-      .replace(/\b(go\s+to)\s+(go\s+to)\b/gi, "$1")
-      .trim();
+    let chunk = rawChunk.replace(/\b(\w+)(?:\s+\1\b)+/gi, "$1").replace(/\b(go\s+to)\s+(go\s+to)\b/gi, "$1").trim();
     if (!chunk || chunk.length < 2) continue;
-
     let date = "Today";
     let time = "9:00 AM";
-    let recurrenceRule: string | null = null;
-
-    // Recurrence checks
+    let recurrenceRule = null;
     if (/\bevery\s+monday\b/i.test(chunk)) {
       recurrenceRule = "Every Monday";
       date = "Monday";
@@ -213,8 +119,6 @@ export function parseMultiTaskFallback(prompt: string): TaskEngineResult {
         date = match[1].charAt(0).toUpperCase() + match[1].slice(1);
       }
     }
-
-    // Date checks
     if (!recurrenceRule) {
       if (/\btomorrow\b/i.test(chunk)) {
         date = "Tomorrow";
@@ -229,8 +133,6 @@ export function parseMultiTaskFallback(prompt: string): TaskEngineResult {
         }
       }
     }
-
-    // Time checks
     const meridiemMatch = chunk.match(/(?:^|\s)(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(AM|PM)(?:\s|[.,]|$)/i);
     const time24Match = chunk.match(/(?:^|\s)(?:at\s+)?([01]?\d|2[0-3]):([0-5]\d)(?:\s|[.,]|$)/i);
     const tonightHourMatch = chunk.match(/(?:^|\s)(?:at\s+)?(\d{1,2})\s*tonight(?:\s|[.,]|$)/i);
@@ -238,7 +140,6 @@ export function parseMultiTaskFallback(prompt: string): TaskEngineResult {
     const noonMatch = /\bnoon\b/i.test(chunk);
     const midnightMatch = /\bmidnight\b/i.test(chunk);
     const morningMatch = /\b(?:in\s+the\s+morning|tomorrow\s+morning)\b/i.test(chunk);
-
     if (meridiemMatch) {
       const h = parseInt(meridiemMatch[1], 10);
       const m = meridiemMatch[2] || "00";
@@ -278,22 +179,8 @@ export function parseMultiTaskFallback(prompt: string): TaskEngineResult {
     } else if (morningMatch) {
       time = "9:00 AM";
     }
-
-    // Clean task description
-    let cleaned = chunk
-      .replace(/^(?:please\s+)?(?:remind\s+me\s+to|i\s+need\s+to|i\s+want\s+to|i\s+have\s+to|i\s+have\s+a\s+meeting\s+(?:with|at)?|remind\s+me)\s*/i, "")
-      .replace(/\b(?:please\s+)?(?:remind\s+me\s+to|i\s+need\s+to|i\s+want\s+to|i\s+have\s+to|remind\s+me)\s*/gi, "")
-      .replace(/\b(?:today|tomorrow|tonight|this\s+evening|this\s+morning|every\s+monday|every\s+morning|daily)\b/gi, " ")
-      .replace(/\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/gi, " ")
-      .replace(/(?:^|\s)(?:at\s+)?\d{1,2}(?::\d{2})?\s*(?:am|pm)?/gi, " ")
-      .replace(/\b(?:in\s+the\s+morning|tomorrow\s+morning|noon|midnight)\b/gi, " ")
-      .replace(/[.,;!]+$/g, "")
-      .replace(/^[.,;!]+/g, "")
-      .replace(/\s+/g, " ")
-      .trim();
-
+    let cleaned = chunk.replace(/^(?:please\s+)?(?:remind\s+me\s+to|i\s+need\s+to|i\s+want\s+to|i\s+have\s+to|i\s+have\s+a\s+meeting\s+(?:with|at)?|remind\s+me)\s*/i, "").replace(/\b(?:please\s+)?(?:remind\s+me\s+to|i\s+need\s+to|i\s+want\s+to|i\s+have\s+to|remind\s+me)\s*/gi, "").replace(/\b(?:today|tomorrow|tonight|this\s+evening|this\s+morning|every\s+monday|every\s+morning|daily)\b/gi, " ").replace(/\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/gi, " ").replace(/(?:^|\s)(?:at\s+)?\d{1,2}(?::\d{2})?\s*(?:am|pm)?/gi, " ").replace(/\b(?:in\s+the\s+morning|tomorrow\s+morning|noon|midnight)\b/gi, " ").replace(/[.,;!]+$/g, "").replace(/^[.,;!]+/g, "").replace(/\s+/g, " ").trim();
     cleaned = cleaned.replace(/^to\s+/i, "").trim();
-
     if (cleaned.length >= 2) {
       cleaned = cleaned.charAt(0).toUpperCase() + cleaned.slice(1);
       parsedTasks.push({
@@ -304,9 +191,7 @@ export function parseMultiTaskFallback(prompt: string): TaskEngineResult {
       });
     }
   }
-
   const hasMoreThanSeven = rawSegments.length > 7;
-
   return {
     success: parsedTasks.length > 0,
     tasks: parsedTasks,
@@ -314,7 +199,7 @@ export function parseMultiTaskFallback(prompt: string): TaskEngineResult {
     hasMoreThanSeven,
     rawTranscript: prompt,
     diagnostic: {
-      source: 'fallback_parser'
+      source: "fallback_parser"
     },
     task: parsedTasks[0]?.task || "",
     date: parsedTasks[0]?.date || "Today",
@@ -324,19 +209,9 @@ export function parseMultiTaskFallback(prompt: string): TaskEngineResult {
     missingTime: parsedTasks.length === 0 || !parsedTasks[0]?.time
   };
 }
-
-/**
- * Main Task Processing Engine
- * Orchestrates Gemini API extraction (primary: gemini-3.1-flash-lite, backup: gemini-3.8-flash)
- * with structured JSON schema and automatic fallback parser recovery.
- */
-export async function processTaskInput(
-  rawInput: string,
-  userTimezone: string = "UTC"
-): Promise<{ status: number; result: TaskEngineResult }> {
+async function processTaskInput(rawInput, userTimezone = "UTC") {
   const startTime = Date.now();
   const prompt = normalizeTranscript(rawInput);
-
   if (!prompt || prompt.length < 2) {
     return {
       status: 400,
@@ -347,44 +222,39 @@ export async function processTaskInput(
         hasMoreThanSeven: false,
         rawTranscript: rawInput || "",
         diagnostic: {
-          source: 'fallback_parser',
+          source: "fallback_parser",
           httpStatus: 400,
-          errorCategory: 'TASK_INTERPRETATION_ERROR',
-          errorMessage: 'No task description provided'
+          errorCategory: "TASK_INTERPRETATION_ERROR",
+          errorMessage: "No task description provided"
         },
-        errorCategory: 'TASK_INTERPRETATION_ERROR',
-        message: 'Please speak or enter a task to schedule.'
+        errorCategory: "TASK_INTERPRETATION_ERROR",
+        message: "Please speak or enter a task to schedule."
       }
     };
   }
-
-  // Load API key from runtime environment
   const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.VITE_GEMINI_API_KEY;
-
   if (!apiKey) {
     console.warn("[taskParsingEngine] GEMINI_API_KEY is not configured in environment. Using fallback parser.");
-    const fallbackResult = parseMultiTaskFallback(prompt);
-    fallbackResult.diagnostic = {
-      source: 'fallback_parser',
+    const fallbackResult2 = parseMultiTaskFallback(prompt);
+    fallbackResult2.diagnostic = {
+      source: "fallback_parser",
       httpStatus: 401,
-      errorCategory: 'AUTHENTICATION_ERROR',
-      errorMessage: 'GEMINI_API_KEY is missing in environment variables. Add GEMINI_API_KEY to your deployment configuration.'
+      errorCategory: "AUTHENTICATION_ERROR",
+      errorMessage: "GEMINI_API_KEY is missing in environment variables. Add GEMINI_API_KEY to your deployment configuration."
     };
     return {
       status: 200,
-      result: fallbackResult
+      result: fallbackResult2
     };
   }
-
   const ai = new GoogleGenAI({
     apiKey,
     httpOptions: {
       headers: {
-        'User-Agent': 'aistudio-daily-task-ai'
+        "User-Agent": "aistudio-daily-task-ai"
       }
     }
   });
-
   const systemInstruction = `You are Daily TASK AI's intelligent task parsing assistant.
 Extract between 1 and 7 actionable tasks from the user's natural language input (spoken voice recording or typed note).
 The input can be a single task or multiple tasks in one voice note (up to 60 seconds of speech).
@@ -403,7 +273,6 @@ Rules:
 5. 'recurrenceRule': If recurring (e.g. 'Every Monday', 'Every Morning', 'Daily'), return clean string, otherwise null.
 6. Maximum tasks: Return at most 7 tasks. If the user mentions more than 7 tasks, extract only the first 7 and set 'hasMoreThanSeven' to true. Otherwise, set 'hasMoreThanSeven' to false.
 User timezone: ${userTimezone}.`;
-
   const responseSchema = {
     type: Type.OBJECT,
     properties: {
@@ -440,8 +309,7 @@ User timezone: ${userTimezone}.`;
     },
     required: ["tasks", "hasMoreThanSeven"]
   };
-
-  const callModelWithTimeout = async (modelName: string, timeoutMs: number = 10000) => {
+  const callModelWithTimeout = async (modelName, timeoutMs = 1e4) => {
     const callPromise = ai.models.generateContent({
       model: modelName,
       contents: prompt,
@@ -451,11 +319,9 @@ User timezone: ${userTimezone}.`;
         responseSchema
       }
     });
-
-    const timeoutPromise = new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error(`Timeout (${timeoutMs}ms) calling ${modelName}`)), timeoutMs)
+    const timeoutPromise = new Promise(
+      (_, reject) => setTimeout(() => reject(new Error(`Timeout (${timeoutMs}ms) calling ${modelName}`)), timeoutMs)
     );
-
     const response = await Promise.race([callPromise, timeoutPromise]);
     let jsonStr = response.text?.trim() || "{}";
     if (jsonStr.startsWith("```json")) {
@@ -465,17 +331,14 @@ User timezone: ${userTimezone}.`;
     }
     return JSON.parse(jsonStr);
   };
-
-  let extractedData: any = null;
-  let successfulModel: string | null = null;
-  let lastErrorDiagnostic: { category: TaskErrorCategory; status: number; message: string; safeDetails: string } | null = null;
-
-  // Primary model: gemini-3.5-flash-lite (ultra-fast ~600ms, active free-tier quota, reliable JSON schema)
+  let extractedData = null;
+  let successfulModel = null;
+  let lastErrorDiagnostic = null;
   try {
-    extractedData = await callModelWithTimeout("gemini-3.5-flash-lite", 10000);
+    extractedData = await callModelWithTimeout("gemini-3.5-flash-lite", 1e4);
     successfulModel = "gemini-3.5-flash-lite";
     console.log("[taskParsingEngine] gemini-3.5-flash-lite succeeded in", Date.now() - startTime, "ms");
-  } catch (errPrimary: any) {
+  } catch (errPrimary) {
     const primaryDiag = classifyGeminiError(errPrimary);
     lastErrorDiagnostic = primaryDiag;
     console.warn("[taskParsingEngine] gemini-3.5-flash-lite error:", {
@@ -483,14 +346,12 @@ User timezone: ${userTimezone}.`;
       status: primaryDiag.status,
       message: primaryDiag.message
     });
-
-    // Secondary model: gemini-3.1-flash-lite
-    if (primaryDiag.category !== 'AUTHENTICATION_ERROR') {
+    if (primaryDiag.category !== "AUTHENTICATION_ERROR") {
       try {
-        extractedData = await callModelWithTimeout("gemini-3.1-flash-lite", 10000);
+        extractedData = await callModelWithTimeout("gemini-3.1-flash-lite", 1e4);
         successfulModel = "gemini-3.1-flash-lite";
         console.log("[taskParsingEngine] gemini-3.1-flash-lite succeeded as secondary");
-      } catch (errSec: any) {
+      } catch (errSec) {
         const secDiag = classifyGeminiError(errSec);
         lastErrorDiagnostic = secDiag;
         console.warn("[taskParsingEngine] gemini-3.1-flash-lite secondary error:", {
@@ -498,13 +359,11 @@ User timezone: ${userTimezone}.`;
           status: secDiag.status,
           message: secDiag.message
         });
-
-        // Tertiary model: gemini-flash-lite-latest
         try {
-          extractedData = await callModelWithTimeout("gemini-flash-lite-latest", 10000);
+          extractedData = await callModelWithTimeout("gemini-flash-lite-latest", 1e4);
           successfulModel = "gemini-flash-lite-latest";
           console.log("[taskParsingEngine] gemini-flash-lite-latest succeeded as tertiary");
-        } catch (errTer: any) {
+        } catch (errTer) {
           const terDiag = classifyGeminiError(errTer);
           lastErrorDiagnostic = terDiag;
           console.warn("[taskParsingEngine] gemini-flash-lite-latest tertiary error:", {
@@ -516,21 +375,14 @@ User timezone: ${userTimezone}.`;
       }
     }
   }
-
-  // If AI model returned valid tasks
   if (extractedData && Array.isArray(extractedData.tasks) && extractedData.tasks.length > 0) {
-    const sanitizedTasks: TaskItem[] = extractedData.tasks
-      .slice(0, 7)
-      .map((t: any) => ({
-        task: String(t.task || "").trim().replace(/[.,;!]+$/g, ""),
-        date: String(t.date || "Today").trim(),
-        time: String(t.time || "9:00 AM").trim(),
-        recurrenceRule: t.recurrenceRule ? String(t.recurrenceRule).trim() : null
-      }))
-      .filter((t: TaskItem) => t.task.length >= 2);
-
+    const sanitizedTasks = extractedData.tasks.slice(0, 7).map((t) => ({
+      task: String(t.task || "").trim().replace(/[.,;!]+$/g, ""),
+      date: String(t.date || "Today").trim(),
+      time: String(t.time || "9:00 AM").trim(),
+      recurrenceRule: t.recurrenceRule ? String(t.recurrenceRule).trim() : null
+    })).filter((t) => t.task.length >= 2);
     const hasMoreThanSeven = Boolean(extractedData.hasMoreThanSeven || extractedData.tasks.length > 7);
-
     return {
       status: 200,
       result: {
@@ -540,8 +392,8 @@ User timezone: ${userTimezone}.`;
         hasMoreThanSeven,
         rawTranscript: prompt,
         diagnostic: {
-          source: 'gemini',
-          modelAttempted: successfulModel || 'gemini-3.1-flash-lite',
+          source: "gemini",
+          modelAttempted: successfulModel || "gemini-3.1-flash-lite",
           httpStatus: 200,
           durationMs: Date.now() - startTime
         },
@@ -554,21 +406,56 @@ User timezone: ${userTimezone}.`;
       }
     };
   }
-
-  // Fallback: Use multi-task natural language engine
   console.log("[taskParsingEngine] AI models unavailable or returned 0 tasks. Applying fallback parser.");
   const fallbackResult = parseMultiTaskFallback(prompt);
   fallbackResult.diagnostic = {
-    source: 'fallback_parser',
-    modelAttempted: 'gemini-3.1-flash-lite',
+    source: "fallback_parser",
+    modelAttempted: "gemini-3.1-flash-lite",
     httpStatus: lastErrorDiagnostic?.status || 200,
-    errorCategory: lastErrorDiagnostic?.category || 'TASK_INTERPRETATION_ERROR',
-    errorMessage: lastErrorDiagnostic?.message || 'Recovered via fallback parser',
+    errorCategory: lastErrorDiagnostic?.category || "TASK_INTERPRETATION_ERROR",
+    errorMessage: lastErrorDiagnostic?.message || "Recovered via fallback parser",
     durationMs: Date.now() - startTime
   };
-
   return {
     status: 200,
     result: fallbackResult
   };
 }
+
+// src/api/parse-task.ts
+async function handler(req, res) {
+  res.setHeader("Access-Control-Allow-Credentials", "true");
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS,PATCH,DELETE,POST,PUT");
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version"
+  );
+  if (req.method === "OPTIONS") {
+    return res.status(200).end();
+  }
+  if (req.method !== "POST") {
+    return res.status(405).json({ error: "Method not allowed" });
+  }
+  try {
+    const body = typeof req.body === "string" ? JSON.parse(req.body) : req.body || {};
+    const rawInput = body.prompt || body.text || body.taskText || "";
+    const userTimezone = body.userTimezone || "UTC";
+    console.log("[Vercel /api/parse-task] Request received:", {
+      promptPreview: String(rawInput).slice(0, 100),
+      userTimezone
+    });
+    const { status, result } = await processTaskInput(rawInput, userTimezone);
+    return res.status(status).json(result);
+  } catch (err) {
+    console.error("[Vercel /api/parse-task] Fatal execution error:", err);
+    return res.status(500).json({
+      success: false,
+      errorCategory: "API_REQUEST_ERROR",
+      message: err?.message || "Server error processing task"
+    });
+  }
+}
+export {
+  handler as default
+};

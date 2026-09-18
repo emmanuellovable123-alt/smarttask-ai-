@@ -4,6 +4,7 @@ import { useTasks } from '../lib/TaskContext';
 import { motion, AnimatePresence } from 'motion/react';
 import { X, Mic, Loader2, AlertCircle, Send, Trash2, Plus, Clock, Calendar, Check, Square } from 'lucide-react';
 import { getUserTimezone } from '../lib/dateUtils';
+import { parseMultiTaskFallback } from '../lib/taskParsingEngine';
 
 type VoiceState = 'idle' | 'listening' | 'processing' | 'reviewing' | 'clarifying' | 'error';
 
@@ -313,6 +314,25 @@ export function VoiceTaskModal({ user, onClose, onSaved }: { user: User, onClose
       });
 
       if (!res.ok) {
+        // Attempt resilient local fallback parser so user is NEVER blocked if server has an issue
+        const localFallback = parseMultiTaskFallback(textToProcess);
+        if (localFallback.success && localFallback.tasks.length > 0) {
+          console.warn("[VoiceTaskModal] Endpoint returned status", httpStatus, "- using resilient local parser fallback");
+          const formattedReviewTasks: ReviewTaskItem[] = localFallback.tasks.map((t, idx) => ({
+            id: `review-${Date.now()}-${idx}`,
+            task: t.task,
+            date: t.date || "Today",
+            time: t.time || "9:00 AM",
+            recurrenceRule: t.recurrenceRule || null
+          }));
+          setReviewTasks(formattedReviewTasks);
+          setHasMoreThanSeven(Boolean(localFallback.hasMoreThanSeven));
+          setRawTranscript(textToProcess);
+          voiceStateRef.current = 'reviewing';
+          setVoiceState('reviewing');
+          return;
+        }
+
         if (errorCategory === 'AUTHENTICATION_ERROR') {
           setClarificationMsg(`AI Authentication Error (HTTP ${httpStatus}): Gemini API key is missing or invalid. Please check your environment variables.`);
         } else if (errorCategory === 'RATE_LIMIT_ERROR') {
@@ -360,6 +380,26 @@ export function VoiceTaskModal({ user, onClose, onSaved }: { user: User, onClose
         message: err?.message || err,
         endpoint: '/api/parse-task'
       });
+
+      // Attempt resilient local fallback parser so user is NEVER blocked if network drops
+      const localFallback = parseMultiTaskFallback(textToProcess);
+      if (localFallback.success && localFallback.tasks.length > 0) {
+        console.warn("[VoiceTaskModal] Network offline/unreachable - using resilient local parser fallback");
+        const formattedReviewTasks: ReviewTaskItem[] = localFallback.tasks.map((t, idx) => ({
+          id: `review-${Date.now()}-${idx}`,
+          task: t.task,
+          date: t.date || "Today",
+          time: t.time || "9:00 AM",
+          recurrenceRule: t.recurrenceRule || null
+        }));
+        setReviewTasks(formattedReviewTasks);
+        setHasMoreThanSeven(Boolean(localFallback.hasMoreThanSeven));
+        setRawTranscript(textToProcess);
+        voiceStateRef.current = 'reviewing';
+        setVoiceState('reviewing');
+        return;
+      }
+
       setClarificationMsg("Network Error: Could not reach the task assistant service. Please check your connection or try again.");
       voiceStateRef.current = 'clarifying';
       setVoiceState('clarifying');
