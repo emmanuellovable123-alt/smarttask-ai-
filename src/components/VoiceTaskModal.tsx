@@ -16,6 +16,7 @@ interface ReviewTaskItem {
 }
 
 interface ParsedTaskApiResponse {
+  success?: boolean;
   tasks?: Array<{
     task: string;
     date: string;
@@ -32,6 +33,16 @@ interface ParsedTaskApiResponse {
   missingTask?: boolean;
   missingTime?: boolean;
   error?: string;
+  errorCategory?: string;
+  message?: string;
+  diagnostic?: {
+    source?: string;
+    modelAttempted?: string;
+    httpStatus?: number;
+    errorCategory?: string;
+    errorMessage?: string;
+    durationMs?: number;
+  };
 }
 
 export function VoiceTaskModal({ user, onClose, onSaved }: { user: User, onClose: () => void, onSaved: () => void }) {
@@ -258,6 +269,13 @@ export function VoiceTaskModal({ user, onClose, onSaved }: { user: User, onClose
     setVoiceState('processing');
 
     try {
+      console.log(`[VoiceTaskModal] Dispatching task parse request:`, {
+        endpoint: '/api/parse-task',
+        length: textToProcess.length,
+        preview: textToProcess.slice(0, 100),
+        userTimezone: getUserTimezone()
+      });
+
       const res = await fetch('/api/parse-task', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -268,19 +286,56 @@ export function VoiceTaskModal({ user, onClose, onSaved }: { user: User, onClose
         })
       });
 
-      if (!res.ok) {
-        throw new Error(`Server returned HTTP ${res.status}`);
+      let data: ParsedTaskApiResponse | null = null;
+      try {
+        data = await res.json();
+      } catch (jsonErr) {
+        console.error("[VoiceTaskModal] Failed to parse response JSON (received non-JSON or HTML body):", jsonErr);
       }
 
-      const data: ParsedTaskApiResponse = await res.json();
-      console.log("[VoiceTaskModal] parse-task API result:", data);
+      const httpStatus = res.status;
+      const errorCategory = data?.errorCategory || (
+        httpStatus === 401 ? 'AUTHENTICATION_ERROR' :
+        httpStatus === 403 ? 'PERMISSION_ERROR' :
+        httpStatus === 404 ? 'MODEL_ERROR' :
+        httpStatus === 429 ? 'RATE_LIMIT_ERROR' :
+        httpStatus >= 500 ? 'API_REQUEST_ERROR' :
+        null
+      );
 
-      const items = (data.tasks && data.tasks.length > 0)
+      console.log("[VoiceTaskModal] /api/parse-task response received:", {
+        status: httpStatus,
+        ok: res.ok,
+        errorCategory,
+        diagnostic: data?.diagnostic,
+        taskCount: data?.tasks?.length,
+        message: data?.message
+      });
+
+      if (!res.ok) {
+        if (errorCategory === 'AUTHENTICATION_ERROR') {
+          setClarificationMsg(`AI Authentication Error (HTTP ${httpStatus}): Gemini API key is missing or invalid. Please check your environment variables.`);
+        } else if (errorCategory === 'RATE_LIMIT_ERROR') {
+          setClarificationMsg(`AI Quota Exceeded (HTTP ${httpStatus}): Gemini free tier quota is temporarily busy. Please wait a moment or type your task.`);
+        } else if (errorCategory === 'PERMISSION_ERROR') {
+          setClarificationMsg(`AI Permission Error (HTTP ${httpStatus}): Generative Language API access was denied.`);
+        } else if (errorCategory === 'MODEL_ERROR') {
+          setClarificationMsg(`AI Model Error (HTTP ${httpStatus}): Model endpoint not found.`);
+        } else {
+          setClarificationMsg(`Task Assistant Notice (HTTP ${httpStatus}): ${data?.message || "Could not process task."}`);
+        }
+        voiceStateRef.current = 'clarifying';
+        setVoiceState('clarifying');
+        return;
+      }
+
+      const items = (data?.tasks && data.tasks.length > 0)
         ? data.tasks
-        : (data.task ? [{ task: data.task, date: data.date || "Today", time: data.time || "9:00 AM", recurrenceRule: data.recurrenceRule || null }] : []);
+        : (data?.task ? [{ task: data.task, date: data.date || "Today", time: data.time || "9:00 AM", recurrenceRule: data.recurrenceRule || null }] : []);
 
       if (items.length === 0) {
-        setClarificationMsg("No actionable tasks could be detected. Please mention what you want to do and the time.");
+        console.warn("[VoiceTaskModal] Zero actionable tasks detected from input:", textToProcess);
+        setClarificationMsg(data?.message || "I couldn't detect a clear task from that recording. Please clarify what you'd like to do (e.g. 'Go to gym at 6 PM').");
         voiceStateRef.current = 'clarifying';
         setVoiceState('clarifying');
         return;
@@ -295,13 +350,17 @@ export function VoiceTaskModal({ user, onClose, onSaved }: { user: User, onClose
       }));
 
       setReviewTasks(formattedReviewTasks);
-      setHasMoreThanSeven(Boolean(data.hasMoreThanSeven));
-      setRawTranscript(data.rawTranscript || textToProcess);
+      setHasMoreThanSeven(Boolean(data?.hasMoreThanSeven));
+      setRawTranscript(data?.rawTranscript || textToProcess);
       voiceStateRef.current = 'reviewing';
       setVoiceState('reviewing');
-    } catch (err) {
-      console.error("[VoiceTaskModal] Connection or parse error:", err);
-      setClarificationMsg("Could not connect to the task assistant right now. Please try again or type your task.");
+    } catch (err: any) {
+      console.error("[VoiceTaskModal] Fatal network or connection error reaching /api/parse-task:", {
+        errorCategory: 'NETWORK_ERROR',
+        message: err?.message || err,
+        endpoint: '/api/parse-task'
+      });
+      setClarificationMsg("Network Error: Could not reach the task assistant service. Please check your connection or try again.");
       voiceStateRef.current = 'clarifying';
       setVoiceState('clarifying');
     } finally {

@@ -1,19 +1,10 @@
 import express from "express";
 import path from "path";
 import { createServer as createViteServer } from "vite";
-import { GoogleGenAI, Type } from "@google/genai";
 import dotenv from "dotenv";
+import { processTaskInput } from "./src/lib/taskParsingEngine";
 
 dotenv.config();
-
-const ai = new GoogleGenAI({
-  apiKey: process.env.GEMINI_API_KEY,
-  httpOptions: {
-    headers: {
-      'User-Agent': 'aistudio-build',
-    }
-  }
-});
 
 async function startServer() {
   const app = express();
@@ -201,145 +192,23 @@ async function startServer() {
   app.post("/api/parse-task", async (req, res) => {
     const rawInput = req.body.prompt || req.body.text || req.body.taskText;
     const userTimezone = req.body.userTimezone || "UTC";
-    console.log("[parse-task] Received input:", rawInput, "Timezone:", userTimezone);
+    console.log("[parse-task] Processing request:", {
+      inputPreview: String(rawInput || '').slice(0, 100),
+      userTimezone
+    });
 
-    if (!rawInput || typeof rawInput !== 'string' || !rawInput.trim()) {
-      return res.status(400).json({ error: "No prompt provided", tasks: [] });
-    }
-
-    // Normalize speech transcript artifacts like 7:00 p.m. -> 7:00 PM, 6 a.m. -> 6 AM
-    const prompt = rawInput.trim()
-      .replace(/(\d{1,2}(?::\d{2})?)\s*p\.m\./gi, "$1 PM")
-      .replace(/(\d{1,2}(?::\d{2})?)\s*a\.m\./gi, "$1 AM")
-      .replace(/(\d{1,2}(?::\d{2})?)\s*pm\b/gi, "$1 PM")
-      .replace(/(\d{1,2}(?::\d{2})?)\s*am\b/gi, "$1 AM");
-
-    const systemInstruction = `You are Daily TASK AI's intelligent task parsing assistant.
-Extract between 1 and 7 actionable tasks from the user's natural language input (spoken voice recording or typed note).
-The input can be a single task or multiple tasks in one voice note (up to 60 seconds of speech).
-For example: "Today at 6 PM I want to call John. At 7 PM remind me to study. Tomorrow at 9 AM I need to go to the bank. Tomorrow at 2 PM remind me to send the document."
-
-Rules:
-1. Extract each distinct task as an object in the 'tasks' array.
-2. 'task': Concise, actionable task description (e.g. 'Call John', 'Study', 'Go to the bank', 'Send the document', 'See my friend', 'Read my Bible'). Strip preambles like 'Remind me to', 'I want to', 'I need to', 'Please remind me to'. Do NOT put the date or time inside 'task'.
-3. 'date': The date of the task ('Today', 'Tomorrow', day name like 'Monday', or specific date). Default to 'Today' if not specified.
-4. 'time': Scheduled time formatted in 12-hour AM/PM format (e.g. '6:00 PM', '7:00 PM', '9:00 AM', '2:00 PM').
-   - 'noon' -> '12:00 PM'
-   - 'midnight' -> '12:00 AM'
-   - '7 tonight' -> '7:00 PM'
-   - 'tomorrow morning' -> '9:00 AM' (unless specific time given)
-5. 'recurrenceRule': If recurring (e.g. 'Every Monday', 'Every Morning', 'Daily'), return clean string, otherwise null.
-6. Maximum tasks: Return at most 7 tasks. If the user mentions more than 7 tasks, extract only the first 7 and set 'hasMoreThanSeven' to true. Otherwise, set 'hasMoreThanSeven' to false.
-User timezone: ${userTimezone}.`;
-
-    const responseSchema = {
-      type: Type.OBJECT,
-      properties: {
-        tasks: {
-          type: Type.ARRAY,
-          items: {
-            type: Type.OBJECT,
-            properties: {
-              task: {
-                type: Type.STRING,
-                description: "The description of the task without preambles or dates/times."
-              },
-              date: {
-                type: Type.STRING,
-                description: "The date for the task ('Today', 'Tomorrow', day name, etc.)."
-              },
-              time: {
-                type: Type.STRING,
-                description: "The time with AM/PM (e.g. '7:00 PM')."
-              },
-              recurrenceRule: {
-                type: Type.STRING,
-                nullable: true,
-                description: "Recurrence string if task repeats, or null."
-              }
-            },
-            required: ["task", "date", "time"]
-          }
-        },
-        hasMoreThanSeven: {
-          type: Type.BOOLEAN,
-          description: "True if more than 7 tasks were found in the note."
-        }
-      },
-      required: ["tasks", "hasMoreThanSeven"]
-    };
-
-    // Helper to attempt a Gemini model call with a timeout
-    const tryGeminiModel = async (modelName: string, timeoutMs: number) => {
-      const callPromise = ai.models.generateContent({
-        model: modelName,
-        contents: prompt,
-        config: {
-          systemInstruction,
-          responseMimeType: "application/json",
-          responseSchema
-        }
-      });
-      const timeoutPromise = new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error(`Timeout with model ${modelName}`)), timeoutMs)
-      );
-      const response = await Promise.race([callPromise, timeoutPromise]);
-      let jsonStr = response.text?.trim() || "{}";
-      if (jsonStr.startsWith("```json")) {
-        jsonStr = jsonStr.replace(/^```json\s*/i, "").replace(/\s*```$/, "");
-      } else if (jsonStr.startsWith("```")) {
-        jsonStr = jsonStr.replace(/^```\s*/, "").replace(/\s*```$/, "");
-      }
-      return JSON.parse(jsonStr);
-    };
-
-    let extractedData: any = null;
-
-    // Try primary model (gemini-3.8-flash)
     try {
-      extractedData = await tryGeminiModel("gemini-3.8-flash", 6000);
-      console.log("[parse-task] gemini-3.8-flash success, tasks found:", extractedData?.tasks?.length);
-    } catch (err1: any) {
-      console.warn("[parse-task] gemini-3.8-flash failed or timed out:", err1?.message || err1);
-      // Try secondary model (gemini-3.1-flash-lite)
-      try {
-        extractedData = await tryGeminiModel("gemini-3.1-flash-lite", 6000);
-        console.log("[parse-task] gemini-3.1-flash-lite success, tasks found:", extractedData?.tasks?.length);
-      } catch (err2: any) {
-        console.warn("[parse-task] gemini-3.1-flash-lite failed or timed out:", err2?.message || err2);
-      }
-    }
-
-    if (extractedData && Array.isArray(extractedData.tasks) && extractedData.tasks.length > 0) {
-      const sanitizedTasks = extractedData.tasks.slice(0, 7).map((t: any) => ({
-        task: String(t.task || "").trim().replace(/[.,;!]+$/g, ""),
-        date: String(t.date || "Today").trim(),
-        time: String(t.time || "9:00 AM").trim(),
-        recurrenceRule: t.recurrenceRule ? String(t.recurrenceRule).trim() : null
-      })).filter((t: any) => t.task.length >= 2);
-
-      const hasMoreThanSeven = Boolean(extractedData.hasMoreThanSeven || extractedData.tasks.length > 7);
-
-      return res.json({
-        tasks: sanitizedTasks,
-        totalFound: sanitizedTasks.length,
-        hasMoreThanSeven,
-        rawTranscript: prompt,
-        // Backward compatibility fields:
-        task: sanitizedTasks[0]?.task || "",
-        date: sanitizedTasks[0]?.date || "Today",
-        time: sanitizedTasks[0]?.time || "",
-        recurrenceRule: sanitizedTasks[0]?.recurrenceRule || null,
-        missingTask: sanitizedTasks.length === 0,
-        missingTime: sanitizedTasks.length === 0 || !sanitizedTasks[0]?.time
+      const { status, result } = await processTaskInput(rawInput, userTimezone);
+      return res.status(status).json(result);
+    } catch (err: any) {
+      console.error("[parse-task] Fatal error in endpoint:", err);
+      return res.status(500).json({
+        success: false,
+        errorCategory: 'API_REQUEST_ERROR',
+        message: err?.message || 'Server error processing task',
+        tasks: []
       });
     }
-
-    // Comprehensive multi-task fallback parser
-    console.log("[parse-task] Applying comprehensive multi-task fallback parser for:", prompt);
-    const fallbackResult = parseMultiTaskFallback(prompt);
-    console.log("[parse-task] Fallback parsed result tasks count:", fallbackResult.tasks.length);
-    return res.json(fallbackResult);
   });
 
   // Payment Checkout Integration
