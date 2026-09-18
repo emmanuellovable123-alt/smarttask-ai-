@@ -2,12 +2,29 @@ import { useState, useRef, useEffect } from 'react';
 import { User, Task } from '../types';
 import { useTasks } from '../lib/TaskContext';
 import { motion, AnimatePresence } from 'motion/react';
-import { X, Mic, Loader2, AlertCircle, Send } from 'lucide-react';
+import { X, Mic, Loader2, AlertCircle, Send, Trash2, Plus, Clock, Calendar, Check, Square } from 'lucide-react';
 import { getUserTimezone } from '../lib/dateUtils';
 
-type VoiceState = 'idle' | 'listening' | 'processing' | 'clarifying' | 'confirming' | 'error';
+type VoiceState = 'idle' | 'listening' | 'processing' | 'reviewing' | 'clarifying' | 'error';
 
-interface ParsedTaskData {
+interface ReviewTaskItem {
+  id: string;
+  task: string;
+  date: string;
+  time: string;
+  recurrenceRule: string | null;
+}
+
+interface ParsedTaskApiResponse {
+  tasks?: Array<{
+    task: string;
+    date: string;
+    time: string;
+    recurrenceRule?: string | null;
+  }>;
+  totalFound?: number;
+  hasMoreThanSeven?: boolean;
+  rawTranscript?: string;
   task?: string;
   date?: string;
   time?: string;
@@ -22,18 +39,37 @@ export function VoiceTaskModal({ user, onClose, onSaved }: { user: User, onClose
   const [voiceState, setVoiceState] = useState<VoiceState>('idle');
   const [transcript, setTranscript] = useState('');
   const [taskInput, setTaskInput] = useState('');
-  const [parsedData, setParsedData] = useState<ParsedTaskData | null>(null);
+  const [reviewTasks, setReviewTasks] = useState<ReviewTaskItem[]>([]);
+  const [hasMoreThanSeven, setHasMoreThanSeven] = useState(false);
+  const [rawTranscript, setRawTranscript] = useState('');
   const [clarificationMsg, setClarificationMsg] = useState('');
+  const [recordingSeconds, setRecordingSeconds] = useState(0);
+  const [isSaving, setIsSaving] = useState(false);
 
   const recognitionRef = useRef<any>(null);
   const transcriptRef = useRef<string>('');
   const taskInputRef = useRef<string>('');
   const voiceStateRef = useRef<VoiceState>('idle');
   const isSubmittingRef = useRef<boolean>(false);
+  const timerIntervalRef = useRef<any>(null);
+  const recordingSecondsRef = useRef<number>(0);
 
   useEffect(() => {
     voiceStateRef.current = voiceState;
   }, [voiceState]);
+
+  const clearTimer = () => {
+    if (timerIntervalRef.current) {
+      clearInterval(timerIntervalRef.current);
+      timerIntervalRef.current = null;
+    }
+  };
+
+  const formatTimer = (seconds: number) => {
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+  };
 
   useEffect(() => {
     // Initialize Web Speech API
@@ -41,13 +77,13 @@ export function VoiceTaskModal({ user, onClose, onSaved }: { user: User, onClose
       const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
       if (SpeechRecognition) {
         recognitionRef.current = new SpeechRecognition();
-        recognitionRef.current.continuous = false;
+        recognitionRef.current.continuous = true;
         recognitionRef.current.interimResults = true;
 
         recognitionRef.current.onresult = (event: any) => {
           let fullTranscript = '';
           for (let i = 0; i < event.results.length; ++i) {
-            fullTranscript += event.results[i][0].transcript;
+            fullTranscript += event.results[i][0].transcript + ' ';
           }
           const trimmed = fullTranscript.trim();
           console.log("[VoiceTaskModal] Speech recognized:", trimmed);
@@ -60,34 +96,42 @@ export function VoiceTaskModal({ user, onClose, onSaved }: { user: User, onClose
         recognitionRef.current.onerror = (event: any) => {
           console.error('[VoiceTaskModal] Speech recognition error:', event.error);
           if (event.error === 'not-allowed') {
-            setClarificationMsg("Microphone permission is required to use Speak Task. Please allow microphone access and try again.");
+            clearTimer();
+            setClarificationMsg("Microphone permission is required. Please allow microphone access or type your task below.");
             voiceStateRef.current = 'error';
             setVoiceState('error');
           } else if (event.error === 'no-speech') {
-            console.warn("[VoiceTaskModal] No speech detected");
-            if (!taskInputRef.current && !transcriptRef.current) {
-              voiceStateRef.current = 'idle';
-              setVoiceState('idle');
-            }
+            console.warn("[VoiceTaskModal] No speech detected yet");
           } else {
-            setClarificationMsg("Speech recognition error: " + event.error);
-            voiceStateRef.current = 'error';
-            setVoiceState('error');
+            console.warn("[VoiceTaskModal] Non-fatal speech error:", event.error);
           }
         };
 
         recognitionRef.current.onend = () => {
-          console.log("[VoiceTaskModal] Speech recognition ended. Current transcript:", transcriptRef.current);
+          console.log("[VoiceTaskModal] Speech recognition onend triggered. State:", voiceStateRef.current);
           if (isSubmittingRef.current) {
             return;
           }
+          // If listening and user reached 60s or finished
           if (voiceStateRef.current === 'listening') {
-            const finalSpeech = (taskInputRef.current || transcriptRef.current).trim();
-            if (finalSpeech) {
-              handleTaskSubmit(finalSpeech);
+            if (recordingSecondsRef.current >= 60) {
+              clearTimer();
+              const finalSpeech = (taskInputRef.current || transcriptRef.current).trim();
+              if (finalSpeech) {
+                handleTaskSubmit(finalSpeech);
+              } else {
+                voiceStateRef.current = 'idle';
+                setVoiceState('idle');
+              }
             } else {
-              voiceStateRef.current = 'idle';
-              setVoiceState('idle');
+              // Attempt to restart if stopped prematurely by browser before 60s
+              try {
+                if (voiceStateRef.current === 'listening') {
+                  recognitionRef.current.start();
+                }
+              } catch (e) {
+                // Ignore if cannot restart
+              }
             }
           }
         };
@@ -98,6 +142,7 @@ export function VoiceTaskModal({ user, onClose, onSaved }: { user: User, onClose
     startListening();
 
     return () => {
+      clearTimer();
       if (recognitionRef.current) {
         recognitionRef.current.onend = null;
         try {
@@ -111,18 +156,19 @@ export function VoiceTaskModal({ user, onClose, onSaved }: { user: User, onClose
   }, []);
 
   const startListening = async () => {
-    console.log("[VoiceTaskModal] Microphone requested");
+    console.log("[VoiceTaskModal] startListening requested");
+    clearTimer();
+    setRecordingSeconds(0);
+    recordingSecondsRef.current = 0;
+
     try {
-      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        console.warn("navigator.mediaDevices.getUserMedia not supported in this browser.");
-      } else {
+      if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        console.log("[VoiceTaskModal] Microphone permission granted");
         stream.getTracks().forEach(track => track.stop());
       }
     } catch (err) {
       console.error("[VoiceTaskModal] Microphone permission denied", err);
-      setClarificationMsg("Microphone permission is required to use Speak Task. Please allow microphone access or type your task below.");
+      setClarificationMsg("Microphone permission is required to use voice. Please allow microphone access or type your task below.");
       voiceStateRef.current = 'error';
       setVoiceState('error');
       return;
@@ -141,23 +187,41 @@ export function VoiceTaskModal({ user, onClose, onSaved }: { user: User, onClose
     taskInputRef.current = '';
     voiceStateRef.current = 'listening';
     setVoiceState('listening');
-    console.log("[VoiceTaskModal] Speech recognition started");
+
     try {
       recognitionRef.current.start();
     } catch (e) {
       console.warn("Recognition already active or restart error:", e);
     }
+
+    // Start 60-second timer
+    timerIntervalRef.current = setInterval(() => {
+      recordingSecondsRef.current += 1;
+      setRecordingSeconds(recordingSecondsRef.current);
+
+      if (recordingSecondsRef.current >= 60) {
+        console.log("[VoiceTaskModal] 60-second limit reached, auto-submitting");
+        clearTimer();
+        stopListeningAndSubmit();
+      }
+    }, 1000);
+  };
+
+  const stopListeningAndSubmit = () => {
+    clearTimer();
+    if (recognitionRef.current) {
+      try {
+        recognitionRef.current.stop();
+      } catch (e) {
+        // ignore
+      }
+    }
+    const finalSpeech = (taskInputRef.current || transcriptRef.current || taskInput || transcript).trim();
+    handleTaskSubmit(finalSpeech);
   };
 
   const handleTaskSubmit = async (overrideText?: string) => {
-    // Prevent overlapping simultaneous submissions
-    if (isSubmittingRef.current) {
-      console.log("[VoiceTaskModal] Already submitting, ignoring duplicate trigger");
-      return;
-    }
-    isSubmittingRef.current = true;
-
-    // If voice recognition is currently running, stop it cleanly
+    clearTimer();
     if (recognitionRef.current) {
       try {
         recognitionRef.current.stop();
@@ -166,21 +230,27 @@ export function VoiceTaskModal({ user, onClose, onSaved }: { user: User, onClose
       }
     }
 
-    // Always resolve the freshest available text (override argument, refs, or state)
+    // Prevent overlapping simultaneous submissions
+    if (isSubmittingRef.current) {
+      console.log("[VoiceTaskModal] Already submitting, ignoring duplicate trigger");
+      return;
+    }
+    isSubmittingRef.current = true;
+
+    // Resolve freshest text
     const textToProcess = (
       (typeof overrideText === 'string' && overrideText.trim())
         ? overrideText
         : (taskInputRef.current || transcriptRef.current || taskInput || transcript)
     ).trim();
 
-    console.log("[VoiceTaskModal] handleTaskSubmit called with text:", textToProcess);
+    console.log("[VoiceTaskModal] Submitting task text:", textToProcess);
 
-    // Empty input validation - do not call API unnecessarily
     if (!textToProcess) {
       isSubmittingRef.current = false;
       voiceStateRef.current = 'clarifying';
       setVoiceState('clarifying');
-      setClarificationMsg("Please enter or speak a task first.");
+      setClarificationMsg("Please speak or type a task first.");
       return;
     }
 
@@ -202,66 +272,36 @@ export function VoiceTaskModal({ user, onClose, onSaved }: { user: User, onClose
         throw new Error(`Server returned HTTP ${res.status}`);
       }
 
-      const data: ParsedTaskData = await res.json();
-      console.log("[VoiceTaskModal] parse-task response:", data);
+      const data: ParsedTaskApiResponse = await res.json();
+      console.log("[VoiceTaskModal] parse-task API result:", data);
 
-      if (data.error) {
-        setParsedData({ error: data.error });
-        setClarificationMsg("I couldn't clearly understand that task. Please include what you want to do and the time.");
+      const items = (data.tasks && data.tasks.length > 0)
+        ? data.tasks
+        : (data.task ? [{ task: data.task, date: data.date || "Today", time: data.time || "9:00 AM", recurrenceRule: data.recurrenceRule || null }] : []);
+
+      if (items.length === 0) {
+        setClarificationMsg("No actionable tasks could be detected. Please mention what you want to do and the time.");
         voiceStateRef.current = 'clarifying';
         setVoiceState('clarifying');
-      } else {
-        // Contextual clarification merging: if user previously had task or time, merge missing fields
-        let resolvedTask = data.task || "";
-        let resolvedDate = data.date || "Today";
-        let resolvedTime = data.time || "";
-        let resolvedRecurrence = data.recurrenceRule || null;
-        let isMissingTask = Boolean(data.missingTask);
-        let isMissingTime = Boolean(data.missingTime);
-
-        if (parsedData) {
-          if (isMissingTask && parsedData.task) {
-            resolvedTask = parsedData.task;
-            isMissingTask = false;
-          }
-          if (isMissingTime && parsedData.time) {
-            resolvedTime = parsedData.time;
-            isMissingTime = false;
-          }
-          if (!resolvedRecurrence && parsedData.recurrenceRule) {
-            resolvedRecurrence = parsedData.recurrenceRule;
-          }
-        }
-
-        const mergedData: ParsedTaskData = {
-          task: resolvedTask,
-          date: resolvedDate,
-          time: resolvedTime,
-          recurrenceRule: resolvedRecurrence,
-          missingTask: isMissingTask,
-          missingTime: isMissingTime
-        };
-
-        if (isMissingTask) {
-          setParsedData(mergedData);
-          setClarificationMsg("What task do you want to be reminded about?");
-          voiceStateRef.current = 'clarifying';
-          setVoiceState('clarifying');
-        } else if (isMissingTime) {
-          setParsedData(mergedData);
-          setClarificationMsg("What's the reminder time?");
-          voiceStateRef.current = 'clarifying';
-          setVoiceState('clarifying');
-        } else {
-          setParsedData(mergedData);
-          voiceStateRef.current = 'confirming';
-          setVoiceState('confirming');
-        }
+        return;
       }
+
+      const formattedReviewTasks: ReviewTaskItem[] = items.map((t, idx) => ({
+        id: `review-${Date.now()}-${idx}`,
+        task: t.task,
+        date: t.date || "Today",
+        time: t.time || "9:00 AM",
+        recurrenceRule: t.recurrenceRule || null
+      }));
+
+      setReviewTasks(formattedReviewTasks);
+      setHasMoreThanSeven(Boolean(data.hasMoreThanSeven));
+      setRawTranscript(data.rawTranscript || textToProcess);
+      voiceStateRef.current = 'reviewing';
+      setVoiceState('reviewing');
     } catch (err) {
-      console.error("[VoiceTaskModal] Failed to parse task:", err);
-      setParsedData({ error: "Failed to parse." });
-      setClarificationMsg("I couldn't clearly understand that task. Please try typing it below.");
+      console.error("[VoiceTaskModal] Connection or parse error:", err);
+      setClarificationMsg("Could not connect to the task assistant right now. Please try again or type your task.");
       voiceStateRef.current = 'clarifying';
       setVoiceState('clarifying');
     } finally {
@@ -269,27 +309,52 @@ export function VoiceTaskModal({ user, onClose, onSaved }: { user: User, onClose
     }
   };
 
-  const handleConfirm = async () => {
-    if (!parsedData || !parsedData.task) return;
-    try {
-      const newTask: Task = {
-        id: crypto.randomUUID(),
-        userId: user.id,
-        taskText: parsedData.task,
-        scheduledDate: parsedData.date || 'Today',
-        scheduledTime: parsedData.time || '',
-        timezone: getUserTimezone(),
-        recurrenceRule: parsedData.recurrenceRule || undefined,
-        status: 'Pending',
-        createdTimestamp: Date.now(),
-        completedTimestamp: null,
-      };
+  const handleUpdateReviewTask = (id: string, field: keyof ReviewTaskItem, value: string) => {
+    setReviewTasks(prev => prev.map(item => item.id === id ? { ...item, [field]: value } : item));
+  };
 
-      await saveTask(newTask);
-      console.log("[VoiceTaskModal] Task created and saved:", newTask);
+  const handleDeleteReviewTask = (id: string) => {
+    setReviewTasks(prev => prev.filter(item => item.id !== id));
+  };
+
+  const handleAddNewTask = () => {
+    const newTask: ReviewTaskItem = {
+      id: `review-${Date.now()}-${reviewTasks.length}`,
+      task: '',
+      date: 'Today',
+      time: '9:00 AM',
+      recurrenceRule: null
+    };
+    setReviewTasks(prev => [...prev, newTask]);
+  };
+
+  const handleConfirmAndSaveAll = async () => {
+    if (reviewTasks.length === 0) return;
+    setIsSaving(true);
+    try {
+      for (const t of reviewTasks) {
+        if (!t.task.trim()) continue;
+        const newTask: Task = {
+          id: crypto.randomUUID(),
+          userId: user.id,
+          taskText: t.task.trim(),
+          scheduledDate: t.date.trim() || 'Today',
+          scheduledTime: t.time.trim() || '9:00 AM',
+          timezone: getUserTimezone(),
+          recurrenceRule: t.recurrenceRule || undefined,
+          status: 'Pending',
+          createdTimestamp: Date.now(),
+          completedTimestamp: null,
+        };
+        await saveTask(newTask);
+        console.log("[VoiceTaskModal] Saved independent task:", newTask);
+      }
       await onSaved();
+      onClose();
     } catch (err) {
-      console.error('Failed to confirm and save task:', err);
+      console.error("[VoiceTaskModal] Failed to save tasks:", err);
+    } finally {
+      setIsSaving(false);
     }
   };
 
@@ -308,55 +373,107 @@ export function VoiceTaskModal({ user, onClose, onSaved }: { user: User, onClose
           animate={{ y: 0 }}
           exit={{ y: '100%' }}
           transition={{ type: "spring", damping: 25, stiffness: 300 }}
-          className="bg-white rounded-t-3xl p-6 relative z-10 shadow-2xl min-h-[52vh] flex flex-col"
+          className="bg-white rounded-t-3xl p-6 relative z-10 shadow-2xl max-h-[85vh] min-h-[50vh] flex flex-col overflow-hidden"
         >
-          <div className="flex justify-between items-center mb-4">
-            <h3 className="text-xl font-bold text-slate-900">
-              {voiceState === 'confirming' ? "Here's what I understood:" : "Voice Assistant"}
-            </h3>
-            <button onClick={onClose} className="p-2 bg-slate-100 rounded-full text-slate-500 hover:text-slate-900">
+          {/* Header */}
+          <div className="flex justify-between items-center pb-3 border-b border-slate-100 flex-shrink-0">
+            <div>
+              <h3 className="text-xl font-bold text-slate-900">
+                {voiceState === 'reviewing' 
+                  ? (reviewTasks.length === 1 ? "I found 1 task" : `I found ${reviewTasks.length} tasks`)
+                  : "Voice Task Assistant"}
+              </h3>
+              {voiceState === 'listening' && (
+                <p className="text-xs text-blue-600 font-medium mt-0.5">
+                  Recording note (up to 60s) • {formatTimer(recordingSeconds)} / 01:00
+                </p>
+              )}
+            </div>
+            <button 
+              onClick={onClose} 
+              className="p-2 bg-slate-100 rounded-full text-slate-500 hover:text-slate-900 hover:bg-slate-200 transition-colors"
+              aria-label="Close"
+            >
               <X className="w-5 h-5" />
             </button>
           </div>
 
-          <div className="flex-1 flex flex-col justify-center items-center">
+          <div className="flex-1 flex flex-col overflow-y-auto py-4">
             
+            {/* IDLE STATE */}
             {voiceState === 'idle' && (
-              <div className="text-center my-auto">
+              <div className="text-center my-auto py-6">
                 <button 
                   onClick={startListening}
                   className="w-24 h-24 bg-blue-600 rounded-full flex items-center justify-center text-white mb-4 hover:bg-blue-700 hover:scale-105 active:scale-95 transition-all shadow-xl shadow-blue-600/30 mx-auto"
+                  aria-label="Start recording"
                 >
                   <Mic className="w-10 h-10" />
                 </button>
-                <p className="text-slate-600 font-semibold">Tap to speak</p>
-                <p className="text-xs text-slate-400 mt-1">or type your reminder below</p>
-              </div>
-            )}
-
-            {voiceState === 'listening' && (
-              <div className="text-center w-full my-auto">
-                <div className="w-24 h-24 bg-red-500 rounded-full flex items-center justify-center text-white mb-4 mx-auto animate-pulse shadow-xl shadow-red-500/30">
-                  <Mic className="w-10 h-10" />
-                </div>
-                <p className="text-slate-800 text-lg min-h-[3rem] italic px-4 font-medium">
-                  {transcript || "Listening... speak now"}
+                <p className="text-slate-800 font-bold text-lg">Tap to speak</p>
+                <p className="text-xs text-slate-500 mt-1 max-w-xs mx-auto">
+                  Speak up to 60 seconds. You can mention 1 to 7 tasks in a single voice note!
                 </p>
               </div>
             )}
 
-            {voiceState === 'processing' && (
-              <div className="text-center my-auto">
-                <Loader2 className="w-12 h-12 text-blue-600 animate-spin mx-auto mb-4" />
-                <p className="text-slate-600 font-medium">Processing your request...</p>
+            {/* LISTENING STATE */}
+            {voiceState === 'listening' && (
+              <div className="text-center w-full my-auto py-4">
+                <div className="relative w-24 h-24 mx-auto mb-4">
+                  <div className="absolute inset-0 bg-red-500 rounded-full animate-ping opacity-25"></div>
+                  <button 
+                    onClick={stopListeningAndSubmit}
+                    className="relative w-24 h-24 bg-red-600 rounded-full flex flex-col items-center justify-center text-white hover:bg-red-700 active:scale-95 transition-all shadow-xl shadow-red-600/30 mx-auto group cursor-pointer"
+                    title="Tap to finish recording"
+                  >
+                    <Square className="w-8 h-8 fill-current mb-0.5" />
+                    <span className="text-[10px] font-bold uppercase tracking-wider">Done</span>
+                  </button>
+                </div>
+
+                <div className="inline-flex items-center gap-2 px-3 py-1 bg-red-50 text-red-700 rounded-full text-xs font-semibold mb-3 border border-red-200">
+                  <span className="w-2 h-2 rounded-full bg-red-600 animate-pulse"></span>
+                  Listening... {formatTimer(recordingSeconds)} / 01:00
+                </div>
+
+                <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 min-h-[5rem] max-h-36 overflow-y-auto mx-auto max-w-lg text-left">
+                  <p className="text-slate-800 text-sm italic font-medium leading-relaxed">
+                    {transcript || "Listening... speak naturally about your tasks and times."}
+                  </p>
+                </div>
+
+                <div className="mt-4 flex justify-center gap-3">
+                  <button
+                    onClick={stopListeningAndSubmit}
+                    className="bg-slate-900 text-white text-xs font-semibold px-5 py-2.5 rounded-xl hover:bg-slate-800 active:scale-95 transition-all shadow-sm flex items-center gap-1.5"
+                  >
+                    <span>Done Speaking</span>
+                  </button>
+                </div>
               </div>
             )}
 
+            {/* PROCESSING STATE */}
+            {voiceState === 'processing' && (
+              <div className="text-center my-auto py-10">
+                <Loader2 className="w-12 h-12 text-blue-600 animate-spin mx-auto mb-4" />
+                <p className="text-slate-800 font-bold text-lg">Understanding your tasks...</p>
+                <p className="text-xs text-slate-500 mt-1">Extracting tasks, dates, and times</p>
+              </div>
+            )}
+
+            {/* CLARIFYING / PROMPT GUIDANCE */}
             {voiceState === 'clarifying' && (
-              <div className="text-center w-full my-auto">
-                <div className="bg-amber-50 text-amber-800 p-4 rounded-2xl mb-5 flex items-start gap-3 text-left border border-amber-200">
+              <div className="text-center w-full my-auto py-4">
+                <div className="bg-amber-50 text-amber-900 p-4 rounded-2xl mb-5 flex items-start gap-3 text-left border border-amber-200">
                   <AlertCircle className="w-6 h-6 flex-shrink-0 text-amber-600 mt-0.5" />
-                  <p className="font-medium text-base leading-tight">{clarificationMsg}</p>
+                  <div>
+                    <p className="font-semibold text-sm leading-snug">{clarificationMsg}</p>
+                    <p className="text-xs text-amber-700 mt-1">
+                      Example: "Call John at 6 PM today and study at 7 PM today."
+                    </p>
+                  </div>
                 </div>
                 <button 
                   onClick={startListening}
@@ -364,59 +481,163 @@ export function VoiceTaskModal({ user, onClose, onSaved }: { user: User, onClose
                 >
                   <Mic className="w-8 h-8" />
                 </button>
-                <p className="text-slate-500 font-medium text-sm">Tap to reply with voice</p>
+                <p className="text-slate-600 font-medium text-xs">Tap to speak again</p>
               </div>
             )}
 
+            {/* ERROR STATE */}
             {voiceState === 'error' && (
-              <div className="text-center w-full my-auto">
+              <div className="text-center w-full my-auto py-6">
                 <div className="bg-red-50 text-red-800 p-4 rounded-2xl mb-5 flex items-start gap-3 text-left border border-red-200">
                   <AlertCircle className="w-6 h-6 flex-shrink-0 text-red-600 mt-0.5" />
                   <p className="font-medium text-sm leading-tight">{clarificationMsg}</p>
                 </div>
-                <button 
-                  onClick={() => setVoiceState('idle')}
-                  className="bg-slate-200 text-slate-700 px-6 py-2.5 rounded-xl font-semibold hover:bg-slate-300 transition-colors mx-auto text-sm"
-                >
-                  Try Again
-                </button>
+                <div className="flex justify-center gap-3">
+                  <button 
+                    onClick={startListening}
+                    className="bg-blue-600 text-white px-5 py-2.5 rounded-xl font-semibold hover:bg-blue-700 transition-colors text-xs"
+                  >
+                    Try Microphone Again
+                  </button>
+                  <button 
+                    onClick={() => setVoiceState('idle')}
+                    className="bg-slate-200 text-slate-700 px-5 py-2.5 rounded-xl font-semibold hover:bg-slate-300 transition-colors text-xs"
+                  >
+                    Cancel
+                  </button>
+                </div>
               </div>
             )}
 
-            {voiceState === 'confirming' && parsedData && (
-              <div className="w-full my-auto">
-                <div className="bg-slate-50 border border-slate-200 rounded-2xl p-5 mb-5 space-y-3">
-                  <div>
-                    <p className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-1">Task</p>
-                    <p className="text-lg font-bold text-slate-900">{parsedData.task}</p>
+            {/* MULTI-TASK REVIEW SCREEN (1 to 7 tasks) */}
+            {voiceState === 'reviewing' && (
+              <div className="w-full space-y-4">
+                {/* User transcript quote */}
+                {rawTranscript && (
+                  <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 text-left">
+                    <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">You said</p>
+                    <p className="text-xs text-slate-700 italic mt-0.5 line-clamp-3">"{rawTranscript}"</p>
                   </div>
-                  <div className="flex gap-4">
-                    <div className="flex-1">
-                      <p className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-1">Date</p>
-                      <p className="text-md font-semibold text-slate-900">{parsedData.date}</p>
-                    </div>
-                    <div className="flex-1">
-                      <p className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-1">Time</p>
-                      <p className="text-md font-semibold text-slate-900">{parsedData.time}</p>
-                    </div>
+                )}
+
+                {/* More than 7 warning banner */}
+                {hasMoreThanSeven && (
+                  <div className="bg-blue-50 border border-blue-200 text-blue-800 p-3 rounded-xl flex items-start gap-2.5 text-xs text-left">
+                    <AlertCircle className="w-4 h-4 flex-shrink-0 text-blue-600 mt-0.5" />
+                    <span>I found more than 7 tasks. Please review these first 7 tasks.</span>
                   </div>
-                  {parsedData.recurrenceRule && (
-                    <div>
-                      <p className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-1">Recurrence</p>
-                      <p className="text-sm font-semibold text-blue-600">{parsedData.recurrenceRule}</p>
+                )}
+
+                {/* List of editable task cards */}
+                <div className="space-y-3 max-h-72 overflow-y-auto pr-1">
+                  {reviewTasks.map((item, index) => (
+                    <div 
+                      key={item.id} 
+                      className="bg-white border border-slate-200 hover:border-slate-300 rounded-2xl p-4 shadow-sm space-y-2.5 text-left relative transition-all"
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-bold bg-slate-100 text-slate-700">
+                          Task {index + 1}
+                        </span>
+                        {reviewTasks.length > 1 && (
+                          <button
+                            onClick={() => handleDeleteReviewTask(item.id)}
+                            className="text-slate-400 hover:text-red-600 p-1 rounded-lg transition-colors"
+                            title="Remove this task"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        )}
+                      </div>
+
+                      {/* Task text input */}
+                      <div>
+                        <input
+                          type="text"
+                          value={item.task}
+                          onChange={(e) => handleUpdateReviewTask(item.id, 'task', e.target.value)}
+                          placeholder="Task name"
+                          className="w-full text-base font-semibold text-slate-900 border-b border-transparent hover:border-slate-200 focus:border-blue-500 focus:outline-none bg-transparent py-0.5"
+                        />
+                      </div>
+
+                      {/* Date & Time fields */}
+                      <div className="grid grid-cols-2 gap-2 text-xs">
+                        <div className="flex items-center gap-1.5 bg-slate-50 border border-slate-200 rounded-xl px-2.5 py-1.5">
+                          <Calendar className="w-3.5 h-3.5 text-slate-400 flex-shrink-0" />
+                          <input
+                            type="text"
+                            value={item.date}
+                            onChange={(e) => handleUpdateReviewTask(item.id, 'date', e.target.value)}
+                            placeholder="Today"
+                            className="bg-transparent w-full text-slate-800 font-medium focus:outline-none"
+                          />
+                        </div>
+                        <div className="flex items-center gap-1.5 bg-slate-50 border border-slate-200 rounded-xl px-2.5 py-1.5">
+                          <Clock className="w-3.5 h-3.5 text-slate-400 flex-shrink-0" />
+                          <input
+                            type="text"
+                            value={item.time}
+                            onChange={(e) => handleUpdateReviewTask(item.id, 'time', e.target.value)}
+                            placeholder="6:00 PM"
+                            className="bg-transparent w-full text-slate-800 font-medium focus:outline-none"
+                          />
+                        </div>
+                      </div>
+
+                      {/* Recurrence badge */}
+                      {item.recurrenceRule && (
+                        <div className="text-[11px] text-blue-600 font-medium">
+                          Repeats: {item.recurrenceRule}
+                        </div>
+                      )}
                     </div>
-                  )}
+                  ))}
                 </div>
 
-                <div className="flex flex-col gap-2.5">
-                  <button onClick={handleConfirm} className="w-full bg-slate-900 text-white font-semibold py-3.5 rounded-xl hover:bg-slate-800 active:scale-[0.98] transition-all">
-                    Confirm Task
+                {/* Add another task button */}
+                {reviewTasks.length < 7 && (
+                  <button
+                    onClick={handleAddNewTask}
+                    className="w-full py-2.5 border border-dashed border-slate-300 hover:border-blue-400 rounded-xl text-xs font-semibold text-slate-600 hover:text-blue-600 flex items-center justify-center gap-1.5 transition-colors"
+                  >
+                    <Plus className="w-4 h-4" />
+                    <span>Add Another Task</span>
                   </button>
-                  <div className="flex gap-2.5">
-                    <button onClick={() => setVoiceState('idle')} className="flex-1 bg-white border border-slate-200 text-slate-700 font-semibold py-3 rounded-xl hover:bg-slate-50 active:scale-[0.98] transition-all text-sm">
-                      Edit
+                )}
+
+                {/* Actions */}
+                <div className="pt-2 flex flex-col gap-2">
+                  <button 
+                    onClick={handleConfirmAndSaveAll}
+                    disabled={isSaving || reviewTasks.length === 0}
+                    className="w-full bg-slate-900 text-white font-semibold py-3.5 rounded-xl hover:bg-slate-800 active:scale-[0.98] transition-all flex items-center justify-center gap-2 shadow-sm disabled:opacity-50"
+                  >
+                    {isSaving ? (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        <span>Saving {reviewTasks.length} {reviewTasks.length === 1 ? "Task" : "Tasks"}...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Check className="w-4 h-4" />
+                        <span>Confirm & Save {reviewTasks.length} {reviewTasks.length === 1 ? "Task" : "Tasks"}</span>
+                      </>
+                    )}
+                  </button>
+                  <div className="flex gap-2">
+                    <button 
+                      onClick={() => setVoiceState('idle')}
+                      disabled={isSaving}
+                      className="flex-1 bg-white border border-slate-200 text-slate-700 font-semibold py-2.5 rounded-xl hover:bg-slate-50 active:scale-[0.98] transition-all text-xs"
+                    >
+                      Speak Again
                     </button>
-                    <button onClick={onClose} className="flex-1 bg-white border border-slate-200 text-slate-700 font-semibold py-3 rounded-xl hover:bg-slate-50 active:scale-[0.98] transition-all text-red-600 text-sm">
+                    <button 
+                      onClick={onClose}
+                      disabled={isSaving}
+                      className="flex-1 bg-white border border-slate-200 text-red-600 font-semibold py-2.5 rounded-xl hover:bg-slate-50 active:scale-[0.98] transition-all text-xs"
+                    >
                       Cancel
                     </button>
                   </div>
@@ -424,15 +645,15 @@ export function VoiceTaskModal({ user, onClose, onSaved }: { user: User, onClose
               </div>
             )}
 
-            {/* Natural language typed task input — synchronized with speech transcript */}
-            {voiceState !== 'confirming' && (
-              <div className="mt-6 w-full pt-4 border-t border-slate-100">
+            {/* Typed input field — synchronized with speech transcript */}
+            {voiceState !== 'reviewing' && (
+              <div className="mt-auto w-full pt-3 border-t border-slate-100 flex-shrink-0">
                 <div className="flex gap-2">
                   <input 
                     type="text"
                     disabled={voiceState === 'processing'}
                     className="flex-1 px-4 py-2.5 text-sm rounded-xl bg-slate-50 border border-slate-200 focus:border-blue-500 focus:bg-white outline-none transition-all disabled:opacity-60"
-                    placeholder="e.g. Remind me to study at 7 PM today"
+                    placeholder="e.g. Call John at 6 PM and study at 7 PM"
                     value={taskInput}
                     onChange={(e) => {
                       const val = e.target.value;
