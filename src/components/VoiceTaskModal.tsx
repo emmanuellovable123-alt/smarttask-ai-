@@ -2,23 +2,32 @@ import { useState, useRef, useEffect } from 'react';
 import { User, Task } from '../types';
 import { useTasks } from '../lib/TaskContext';
 import { motion, AnimatePresence } from 'motion/react';
-import { X, Mic, Loader2, AlertCircle } from 'lucide-react';
+import { X, Mic, Loader2, AlertCircle, Send } from 'lucide-react';
 import { getUserTimezone } from '../lib/dateUtils';
 
 type VoiceState = 'idle' | 'listening' | 'processing' | 'clarifying' | 'confirming' | 'error';
+
+interface ParsedTaskData {
+  task?: string;
+  date?: string;
+  time?: string;
+  recurrenceRule?: string | null;
+  missingTask?: boolean;
+  missingTime?: boolean;
+  error?: string;
+}
 
 export function VoiceTaskModal({ user, onClose, onSaved }: { user: User, onClose: () => void, onSaved: () => void }) {
   const { saveTask } = useTasks();
   const [voiceState, setVoiceState] = useState<VoiceState>('idle');
   const [transcript, setTranscript] = useState('');
-  const [parsedData, setParsedData] = useState<{ task?: string; date?: string; time?: string; missingTask?: boolean; missingTime?: boolean; error?: string } | null>(null);
+  const [taskInput, setTaskInput] = useState('');
+  const [parsedData, setParsedData] = useState<ParsedTaskData | null>(null);
   const [clarificationMsg, setClarificationMsg] = useState('');
-  
-  // For fallback testing
-  const [simulatedInput, setSimulatedInput] = useState('');
-  
+
   const recognitionRef = useRef<any>(null);
   const transcriptRef = useRef<string>('');
+  const taskInputRef = useRef<string>('');
   const voiceStateRef = useRef<VoiceState>('idle');
 
   useEffect(() => {
@@ -40,15 +49,19 @@ export function VoiceTaskModal({ user, onClose, onSaved }: { user: User, onClose
             currentTranscript += event.results[i][0].transcript;
           }
           setTranscript(currentTranscript);
-          setSimulatedInput(currentTranscript);
+          setTaskInput(currentTranscript);
           transcriptRef.current = currentTranscript;
+          taskInputRef.current = currentTranscript;
         };
 
         recognitionRef.current.onerror = (event: any) => {
-          console.error('Speech recognition error', event.error);
+          console.error('Speech recognition error:', event.error);
           if (event.error === 'not-allowed') {
             setClarificationMsg("Microphone permission is required to use Speak Task. Please allow microphone access and try again.");
             setVoiceState('error');
+          } else if (event.error === 'no-speech') {
+            console.warn("No speech detected");
+            setVoiceState('idle');
           } else {
             setClarificationMsg("Speech recognition error: " + event.error);
             setVoiceState('error');
@@ -58,8 +71,9 @@ export function VoiceTaskModal({ user, onClose, onSaved }: { user: User, onClose
         recognitionRef.current.onend = () => {
           console.log("Speech recognition ended. Final transcript:", transcriptRef.current);
           if (voiceStateRef.current === 'listening') {
-            if (transcriptRef.current.trim()) {
-              handleProcess(transcriptRef.current);
+            const finalSpeech = transcriptRef.current.trim();
+            if (finalSpeech) {
+              handleTaskSubmit(finalSpeech);
             } else {
               setVoiceState('idle');
             }
@@ -71,7 +85,11 @@ export function VoiceTaskModal({ user, onClose, onSaved }: { user: User, onClose
     return () => {
       if (recognitionRef.current) {
         recognitionRef.current.onend = null;
-        recognitionRef.current.stop();
+        try {
+          recognitionRef.current.stop();
+        } catch (e) {
+          // ignore
+        }
       }
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -87,7 +105,6 @@ export function VoiceTaskModal({ user, onClose, onSaved }: { user: User, onClose
         console.log("Microphone permission granted");
         stream.getTracks().forEach(track => track.stop());
       }
-      
     } catch (err) {
       console.error("Microphone permission denied", err);
       setClarificationMsg("Microphone permission is required to use Speak Task. Please allow microphone access and try again.");
@@ -96,42 +113,67 @@ export function VoiceTaskModal({ user, onClose, onSaved }: { user: User, onClose
     }
 
     if (!recognitionRef.current) {
-      setClarificationMsg("Speech recognition is not supported in this browser.");
+      setClarificationMsg("Speech recognition is not supported in this browser. You can type your task below.");
       setVoiceState('error');
       return;
     }
 
     setTranscript('');
-    setSimulatedInput('');
+    setTaskInput('');
     transcriptRef.current = '';
+    taskInputRef.current = '';
     setVoiceState('listening');
     console.log("Speech recognition started");
     try {
       recognitionRef.current.start();
     } catch (e) {
-      console.error("Error starting speech recognition:", e);
-      // If it's already started, this will throw, which is fine to ignore.
+      console.warn("Recognition already active or restart error:", e);
     }
   };
 
-  const handleProcess = async (text: string) => {
-    if (!text.trim()) {
-      setVoiceState('idle');
+  const handleTaskSubmit = async (overrideText?: string) => {
+    // If voice recognition is currently running, stop it to prevent overlapping events
+    if (voiceStateRef.current === 'listening' && recognitionRef.current) {
+      try {
+        recognitionRef.current.stop();
+      } catch (e) {
+        // ignore
+      }
+    }
+
+    // Always use the latest available text (override argument, ref, or state)
+    const textToProcess = (typeof overrideText === 'string' 
+      ? overrideText 
+      : (taskInputRef.current || taskInput || transcriptRef.current || transcript)
+    ).trim();
+
+    console.log("[VoiceTaskModal] handleTaskSubmit called with text:", textToProcess);
+
+    // Empty input validation - do not call API unnecessarily
+    if (!textToProcess) {
+      setClarificationMsg("Please enter or speak a task first.");
+      setVoiceState('clarifying');
       return;
     }
-    
+
     setVoiceState('processing');
     try {
       const res = await fetch('/api/parse-task', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text, userTimezone: getUserTimezone() })
+        body: JSON.stringify({
+          prompt: textToProcess,
+          text: textToProcess,
+          userTimezone: getUserTimezone()
+        })
       });
-      const data = await res.json();
-      
+
+      const data: ParsedTaskData = await res.json();
+      console.log("[VoiceTaskModal] parse-task response:", data);
+
       if (data.error) {
         setParsedData({ error: data.error });
-        setClarificationMsg("I couldn't clearly understand that task.");
+        setClarificationMsg("I couldn't clearly understand that task. Please include what you want to do and the time.");
         setVoiceState('clarifying');
       } else if (data.missingTask) {
         setParsedData(data);
@@ -146,18 +188,11 @@ export function VoiceTaskModal({ user, onClose, onSaved }: { user: User, onClose
         setVoiceState('confirming');
       }
     } catch (err) {
-      console.error(err);
+      console.error("[VoiceTaskModal] Failed to parse task:", err);
       setParsedData({ error: "Failed to parse." });
       setClarificationMsg("I couldn't clearly understand that task.");
       setVoiceState('clarifying');
     }
-  };
-
-  const handleSimulate = () => {
-    setTranscript(simulatedInput);
-    transcriptRef.current = simulatedInput;
-    handleProcess(simulatedInput);
-    // setSimulatedInput(''); // Keep it so they see it
   };
 
   const handleConfirm = async () => {
@@ -170,16 +205,17 @@ export function VoiceTaskModal({ user, onClose, onSaved }: { user: User, onClose
         scheduledDate: parsedData.date || 'Today',
         scheduledTime: parsedData.time || '',
         timezone: getUserTimezone(),
+        recurrenceRule: parsedData.recurrenceRule || undefined,
         status: 'Pending',
         createdTimestamp: Date.now(),
         completedTimestamp: null,
       };
 
       await saveTask(newTask);
-      console.log("Task created from transcript", newTask);
+      console.log("[VoiceTaskModal] Task created and saved:", newTask);
       await onSaved();
     } catch (err) {
-      console.error('Failed to confirm and save voice task:', err);
+      console.error('Failed to confirm and save task:', err);
     }
   };
 
@@ -198,9 +234,9 @@ export function VoiceTaskModal({ user, onClose, onSaved }: { user: User, onClose
           animate={{ y: 0 }}
           exit={{ y: '100%' }}
           transition={{ type: "spring", damping: 25, stiffness: 300 }}
-          className="bg-white rounded-t-3xl p-6 relative z-10 shadow-2xl min-h-[50vh] flex flex-col"
+          className="bg-white rounded-t-3xl p-6 relative z-10 shadow-2xl min-h-[52vh] flex flex-col"
         >
-          <div className="flex justify-between items-center mb-6">
+          <div className="flex justify-between items-center mb-4">
             <h3 className="text-xl font-bold text-slate-900">
               {voiceState === 'confirming' ? "Here's what I understood:" : "Voice Assistant"}
             </h3>
@@ -212,60 +248,61 @@ export function VoiceTaskModal({ user, onClose, onSaved }: { user: User, onClose
           <div className="flex-1 flex flex-col justify-center items-center">
             
             {voiceState === 'idle' && (
-              <div className="text-center">
+              <div className="text-center my-auto">
                 <button 
                   onClick={startListening}
-                  className="w-24 h-24 bg-blue-600 rounded-full flex items-center justify-center text-white mb-6 hover:bg-blue-700 hover:scale-105 active:scale-95 transition-all shadow-xl shadow-blue-600/30 mx-auto"
+                  className="w-24 h-24 bg-blue-600 rounded-full flex items-center justify-center text-white mb-4 hover:bg-blue-700 hover:scale-105 active:scale-95 transition-all shadow-xl shadow-blue-600/30 mx-auto"
                 >
                   <Mic className="w-10 h-10" />
                 </button>
-                <p className="text-slate-500 font-medium">Tap to speak</p>
+                <p className="text-slate-600 font-semibold">Tap to speak</p>
+                <p className="text-xs text-slate-400 mt-1">or type your reminder below</p>
               </div>
             )}
 
             {voiceState === 'listening' && (
-              <div className="text-center w-full">
-                <div className="w-24 h-24 bg-red-500 rounded-full flex items-center justify-center text-white mb-6 mx-auto animate-pulse shadow-xl shadow-red-500/30">
+              <div className="text-center w-full my-auto">
+                <div className="w-24 h-24 bg-red-500 rounded-full flex items-center justify-center text-white mb-4 mx-auto animate-pulse shadow-xl shadow-red-500/30">
                   <Mic className="w-10 h-10" />
                 </div>
-                <p className="text-slate-800 text-lg min-h-[3rem] italic px-4">
-                  {transcript || "Listening..."}
+                <p className="text-slate-800 text-lg min-h-[3rem] italic px-4 font-medium">
+                  {transcript || "Listening... speak now"}
                 </p>
               </div>
             )}
 
             {voiceState === 'processing' && (
-              <div className="text-center">
+              <div className="text-center my-auto">
                 <Loader2 className="w-12 h-12 text-blue-600 animate-spin mx-auto mb-4" />
-                <p className="text-slate-500 font-medium">Processing your request...</p>
+                <p className="text-slate-600 font-medium">Processing your request...</p>
               </div>
             )}
 
             {voiceState === 'clarifying' && (
-              <div className="text-center w-full">
-                <div className="bg-amber-50 text-amber-800 p-4 rounded-2xl mb-6 flex items-start gap-3 text-left border border-amber-200">
+              <div className="text-center w-full my-auto">
+                <div className="bg-amber-50 text-amber-800 p-4 rounded-2xl mb-5 flex items-start gap-3 text-left border border-amber-200">
                   <AlertCircle className="w-6 h-6 flex-shrink-0 text-amber-600 mt-0.5" />
-                  <p className="font-medium text-lg leading-tight">{clarificationMsg}</p>
+                  <p className="font-medium text-base leading-tight">{clarificationMsg}</p>
                 </div>
                 <button 
                   onClick={startListening}
-                  className="w-20 h-20 bg-blue-600 rounded-full flex items-center justify-center text-white mb-4 hover:bg-blue-700 hover:scale-105 active:scale-95 transition-all shadow-xl shadow-blue-600/30 mx-auto"
+                  className="w-20 h-20 bg-blue-600 rounded-full flex items-center justify-center text-white mb-3 hover:bg-blue-700 hover:scale-105 active:scale-95 transition-all shadow-xl shadow-blue-600/30 mx-auto"
                 >
                   <Mic className="w-8 h-8" />
                 </button>
-                <p className="text-slate-500 font-medium text-sm">Tap to reply</p>
+                <p className="text-slate-500 font-medium text-sm">Tap to reply with voice</p>
               </div>
             )}
 
             {voiceState === 'error' && (
-              <div className="text-center w-full">
-                <div className="bg-red-50 text-red-800 p-4 rounded-2xl mb-6 flex items-start gap-3 text-left border border-red-200">
+              <div className="text-center w-full my-auto">
+                <div className="bg-red-50 text-red-800 p-4 rounded-2xl mb-5 flex items-start gap-3 text-left border border-red-200">
                   <AlertCircle className="w-6 h-6 flex-shrink-0 text-red-600 mt-0.5" />
-                  <p className="font-medium text-lg leading-tight">{clarificationMsg}</p>
+                  <p className="font-medium text-sm leading-tight">{clarificationMsg}</p>
                 </div>
                 <button 
                   onClick={() => setVoiceState('idle')}
-                  className="bg-slate-200 text-slate-700 px-6 py-3 rounded-xl font-semibold hover:bg-slate-300 transition-colors mx-auto"
+                  className="bg-slate-200 text-slate-700 px-6 py-2.5 rounded-xl font-semibold hover:bg-slate-300 transition-colors mx-auto text-sm"
                 >
                   Try Again
                 </button>
@@ -273,11 +310,11 @@ export function VoiceTaskModal({ user, onClose, onSaved }: { user: User, onClose
             )}
 
             {voiceState === 'confirming' && parsedData && (
-              <div className="w-full">
-                <div className="bg-slate-50 border border-slate-200 rounded-2xl p-5 mb-6 space-y-4">
+              <div className="w-full my-auto">
+                <div className="bg-slate-50 border border-slate-200 rounded-2xl p-5 mb-5 space-y-3">
                   <div>
                     <p className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-1">Task</p>
-                    <p className="text-lg font-semibold text-slate-900">{parsedData.task}</p>
+                    <p className="text-lg font-bold text-slate-900">{parsedData.task}</p>
                   </div>
                   <div className="flex gap-4">
                     <div className="flex-1">
@@ -289,17 +326,23 @@ export function VoiceTaskModal({ user, onClose, onSaved }: { user: User, onClose
                       <p className="text-md font-semibold text-slate-900">{parsedData.time}</p>
                     </div>
                   </div>
+                  {parsedData.recurrenceRule && (
+                    <div>
+                      <p className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-1">Recurrence</p>
+                      <p className="text-sm font-semibold text-blue-600">{parsedData.recurrenceRule}</p>
+                    </div>
+                  )}
                 </div>
 
-                <div className="flex flex-col gap-3">
+                <div className="flex flex-col gap-2.5">
                   <button onClick={handleConfirm} className="w-full bg-slate-900 text-white font-semibold py-3.5 rounded-xl hover:bg-slate-800 active:scale-[0.98] transition-all">
                     Confirm Task
                   </button>
-                  <div className="flex gap-3">
-                    <button onClick={() => setVoiceState('idle')} className="flex-1 bg-white border border-slate-200 text-slate-700 font-semibold py-3.5 rounded-xl hover:bg-slate-50 active:scale-[0.98] transition-all">
+                  <div className="flex gap-2.5">
+                    <button onClick={() => setVoiceState('idle')} className="flex-1 bg-white border border-slate-200 text-slate-700 font-semibold py-3 rounded-xl hover:bg-slate-50 active:scale-[0.98] transition-all text-sm">
                       Edit
                     </button>
-                    <button onClick={onClose} className="flex-1 bg-white border border-slate-200 text-slate-700 font-semibold py-3.5 rounded-xl hover:bg-slate-50 active:scale-[0.98] transition-all text-red-600">
+                    <button onClick={onClose} className="flex-1 bg-white border border-slate-200 text-slate-700 font-semibold py-3 rounded-xl hover:bg-slate-50 active:scale-[0.98] transition-all text-red-600 text-sm">
                       Cancel
                     </button>
                   </div>
@@ -307,26 +350,35 @@ export function VoiceTaskModal({ user, onClose, onSaved }: { user: User, onClose
               </div>
             )}
 
-            {/* Fallback manual input for automated testing when Mic is not available */}
+            {/* Natural language typed task input — synchronized with speech transcript */}
             {voiceState !== 'confirming' && (
-              <div className="mt-10 w-full pt-6 border-t border-slate-100">
-                <p className="text-xs text-slate-400 text-center mb-2">Or type natural language (Testing fallback)</p>
+              <div className="mt-6 w-full pt-4 border-t border-slate-100">
                 <div className="flex gap-2">
                   <input 
                     type="text"
-                    className="flex-1 px-4 py-2 text-sm rounded-xl bg-slate-50 border border-slate-200 focus:border-blue-500 outline-none"
-                    placeholder="e.g. Remind me to call John at 6 PM"
-                    value={simulatedInput}
+                    className="flex-1 px-4 py-2.5 text-sm rounded-xl bg-slate-50 border border-slate-200 focus:border-blue-500 focus:bg-white outline-none transition-all"
+                    placeholder="e.g. Remind me to study at 7 PM today"
+                    value={taskInput}
                     onChange={(e) => {
-                      setSimulatedInput(e.target.value);
-                      if (voiceState === 'listening') {
-                        setTranscript(e.target.value);
+                      const val = e.target.value;
+                      setTaskInput(val);
+                      taskInputRef.current = val;
+                      setTranscript(val);
+                      transcriptRef.current = val;
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        handleTaskSubmit();
                       }
                     }}
-                    onKeyDown={(e) => e.key === 'Enter' && handleSimulate()}
                   />
-                  <button onClick={handleSimulate} className="bg-slate-200 text-slate-700 px-4 py-2 rounded-xl text-sm font-semibold hover:bg-slate-300">
-                    Send
+                  <button 
+                    onClick={() => handleTaskSubmit()} 
+                    className="bg-blue-600 text-white px-4 py-2.5 rounded-xl text-sm font-semibold hover:bg-blue-700 active:scale-95 transition-all flex items-center gap-1.5 shadow-sm"
+                  >
+                    <span>Send</span>
+                    <Send className="w-4 h-4" />
                   </button>
                 </div>
               </div>
@@ -337,3 +389,4 @@ export function VoiceTaskModal({ user, onClose, onSaved }: { user: User, onClose
     </AnimatePresence>
   );
 }
+

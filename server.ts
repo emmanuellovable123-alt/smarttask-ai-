@@ -21,40 +21,153 @@ async function startServer() {
 
   app.use(express.json());
 
+  // Health check endpoint
+  app.get("/api/health", (req, res) => {
+    res.json({ status: "ok" });
+  });
+
+  // Natural language fallback parser when AI model is busy (503/429) or offline
+  function parseTaskFallback(prompt: string) {
+    const text = prompt.trim();
+    if (!text) {
+      return { task: "", date: "Today", time: "", recurrenceRule: null, missingTime: true, missingTask: true };
+    }
+
+    let cleaned = text;
+    let recurrenceRule: string | null = null;
+    let date = "Today";
+    let time = "";
+
+    // 1. Recurrence checks
+    if (/\bevery\s+morning\b/i.test(cleaned)) {
+      recurrenceRule = "Every Morning";
+      cleaned = cleaned.replace(/\bevery\s+morning\b/gi, "");
+    } else if (/\bevery\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/i.test(cleaned)) {
+      const match = cleaned.match(/\bevery\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/i);
+      if (match) {
+        const day = match[1].charAt(0).toUpperCase() + match[1].slice(1).toLowerCase();
+        recurrenceRule = `Every ${day}`;
+        cleaned = cleaned.replace(match[0], "");
+      }
+    } else if (/\bdaily\b|\bevery\s+day\b/i.test(cleaned)) {
+      recurrenceRule = "Daily";
+      cleaned = cleaned.replace(/\bdaily\b|\bevery\s+day\b/gi, "");
+    }
+
+    // 2. Date checks
+    if (/\btomorrow\b/i.test(cleaned)) {
+      date = "Tomorrow";
+      cleaned = cleaned.replace(/\btomorrow\b/gi, "");
+    } else if (/\btoday\b/i.test(cleaned)) {
+      date = "Today";
+      cleaned = cleaned.replace(/\btoday\b/gi, "");
+    } else if (/\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/i.test(cleaned)) {
+      const match = cleaned.match(/\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/i);
+      if (match) {
+        date = match[1].charAt(0).toUpperCase() + match[1].slice(1).toLowerCase();
+        cleaned = cleaned.replace(match[0], "");
+      }
+    }
+
+    // 3. Time checks
+    const timeRegexWithMeridiem = /\b(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b/i;
+    const timeRegex24H = /\b(?:at\s+)?([01]?\d|2[0-3]):([0-5]\d)\b/i;
+    const timeRegexAtHour = /\bat\s+(\d{1,2})\b/i;
+
+    const matchMeridiem = cleaned.match(timeRegexWithMeridiem);
+    if (matchMeridiem) {
+      const hour = parseInt(matchMeridiem[1], 10);
+      const min = matchMeridiem[2] || "00";
+      const ampm = matchMeridiem[3].toUpperCase();
+      time = `${hour}:${min} ${ampm}`;
+      cleaned = cleaned.replace(matchMeridiem[0], "");
+    } else {
+      const match24 = cleaned.match(timeRegex24H);
+      if (match24) {
+        const h = parseInt(match24[1], 10);
+        const m = match24[2];
+        const ampm = h >= 12 ? "PM" : "AM";
+        const h12 = h % 12 || 12;
+        time = `${h12}:${m} ${ampm}`;
+        cleaned = cleaned.replace(match24[0], "");
+      } else {
+        const matchAtHour = cleaned.match(timeRegexAtHour);
+        if (matchAtHour) {
+          const h = parseInt(matchAtHour[1], 10);
+          const ampm = (h >= 1 && h <= 6) || h === 12 ? "PM" : (h >= 7 && h <= 11 ? "AM" : "PM");
+          time = `${h}:00 ${ampm}`;
+          cleaned = cleaned.replace(matchAtHour[0], "");
+        }
+      }
+    }
+
+    // 4. Clean task description
+    cleaned = cleaned
+      .replace(/^[\s,.-]+|[\s,.-]+$/g, "")
+      .replace(/\b(?:remind me to|please remind me to|remind me|i need to|i have to|i want to|don't forget to|remember to|i have a|i have an)\b/gi, "")
+      .replace(/^[\s,.-]+|[\s,.-]+$/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
+
+    const missingTask = !cleaned || cleaned.length < 2;
+    const missingTime = !time;
+
+    return {
+      task: cleaned || "",
+      date,
+      time: time || "",
+      recurrenceRule,
+      missingTime,
+      missingTask
+    };
+  }
+
   // API endpoints
   app.post("/api/parse-task", async (req, res) => {
-    try {
-      const { prompt } = req.body;
-      if (!prompt) {
-        return res.status(400).json({ error: "No prompt provided" });
-      }
+    const rawInput = req.body.prompt || req.body.text || req.body.taskText;
+    console.log("[parse-task] Received input:", rawInput);
 
-      const response = await ai.models.generateContent({
-        model: "gemini-3.1-pro-preview",
+    if (!rawInput || typeof rawInput !== 'string' || !rawInput.trim()) {
+      return res.status(400).json({ error: "No prompt provided" });
+    }
+
+    const prompt = rawInput.trim();
+
+    try {
+      const geminiPromise = ai.models.generateContent({
+        model: "gemini-3.6-flash",
         contents: prompt,
         config: {
-          systemInstruction: `You are a task parsing assistant. 
-Extract the 'task', 'date', and 'time' from the user's natural language request.
-If the user provides a task but no date, default date to "Today".
-If the user provides a task but NO time is provided, you must set 'missingTime' to true.
-If the user provides a time/date but NO task, you must set 'missingTask' to true.
-Do NOT invent a time or a task if it is not clearly stated or implied by the user (except defaulting date to "Today" if unspecified).
-Return a JSON object.`,
+          systemInstruction: `You are an intelligent task parsing assistant for Daily TASK AI.
+Extract task details from the user's natural language input. The input can be phrased in any natural structure (e.g. "Remind me to study at 7 PM today", "I need to call John at 5 PM", "Tomorrow at 10 AM remind me to go to the bank", "Remind me to read my Bible every morning at 6 AM", "I have a meeting at 3 PM today", "Call Mum tomorrow at 4").
+
+Rules:
+1. 'task': Extract the concise description of the task/action (e.g. "study", "call John", "go to the bank", "read my Bible", "meeting", "call Mum"). Strip conversational preamble like "Remind me to" or "I need to".
+2. 'date': The date for the task. If omitted or user says "today", return "Today". If "tomorrow", return "Tomorrow". If a day of the week is given (e.g. "Monday"), return that day capitalized.
+3. 'time': Extract the scheduled time in 12-hour format with AM/PM (e.g. "7:00 PM", "5:00 PM", "10:00 AM", "6:00 AM", "3:00 PM", "4:00 PM"). If user says "at 4", infer the most reasonable daytime "4:00 PM".
+4. 'recurrenceRule': If a recurring schedule is specified (e.g. "every morning", "every Monday", "daily"), return a clean string like "Every Morning", "Every Monday", "Daily". If not recurring, return null.
+5. 'missingTime': Set to true ONLY if no time is specified or inferrable.
+6. 'missingTask': Set to true ONLY if no actionable task was provided.`,
           responseMimeType: "application/json",
           responseSchema: {
             type: Type.OBJECT,
             properties: {
               task: {
                 type: Type.STRING,
-                description: "The name or description of the task (e.g., 'Call my friend', 'Read my book'). Empty string if missing."
+                description: "The description of the task. Empty string if missing."
               },
               date: {
                 type: Type.STRING,
-                description: "The date for the task (e.g., 'Today', 'Tomorrow', 'Monday'). Default to 'Today' if missing."
+                description: "The date for the task ('Today', 'Tomorrow', day name, etc.). Default to 'Today' if missing."
               },
               time: {
                 type: Type.STRING,
-                description: "The time for the task (e.g., '6:00 PM', '15:00'). Empty string if missing."
+                description: "The time with AM/PM (e.g. '7:00 PM'). Empty string if missing."
+              },
+              recurrenceRule: {
+                type: Type.STRING,
+                nullable: true,
+                description: "Recurrence string if task repeats, or null."
               },
               missingTime: {
                 type: Type.BOOLEAN,
@@ -70,12 +183,35 @@ Return a JSON object.`,
         },
       });
 
-      const jsonStr = response.text?.trim() || "{}";
+      const timeoutPromise = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("AI generation timeout - applying instant fallback")), 2500)
+      );
+
+      const response = await Promise.race([geminiPromise, timeoutPromise]);
+
+      let jsonStr = response.text?.trim() || "{}";
+      // Strip markdown code fences if present
+      if (jsonStr.startsWith("```json")) {
+        jsonStr = jsonStr.replace(/^```json\s*/i, "").replace(/\s*```$/, "");
+      } else if (jsonStr.startsWith("```")) {
+        jsonStr = jsonStr.replace(/^```\s*/, "").replace(/\s*```$/, "");
+      }
+
       const data = JSON.parse(jsonStr);
-      res.json(data);
+      console.log("[parse-task] Gemini parsed successfully:", data);
+      return res.json({
+        task: data.task || "",
+        date: data.date || "Today",
+        time: data.time || "",
+        recurrenceRule: data.recurrenceRule || null,
+        missingTime: Boolean(data.missingTime),
+        missingTask: Boolean(data.missingTask)
+      });
     } catch (error) {
-      console.error("Gemini API Error:", error);
-      res.status(500).json({ error: "Failed to parse task" });
+      console.warn("[parse-task] Gemini API encountered issue, applying intelligent fallback:", error);
+      const fallbackResult = parseTaskFallback(prompt);
+      console.log("[parse-task] Fallback parsed successfully:", fallbackResult);
+      return res.json(fallbackResult);
     }
   });
 
