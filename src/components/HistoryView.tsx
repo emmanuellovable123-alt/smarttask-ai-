@@ -1,10 +1,12 @@
 import { User } from '../types';
 import { useTasks } from '../lib/TaskContext';
 import { CheckCircle2, Circle, XCircle, Ban } from 'lucide-react';
+import { AdBanner } from './AdBanner';
 
 export function HistoryView({ user }: { user: User }) {
   const { tasks } = useTasks();
   const sortedTasks = [...tasks].sort((a, b) => b.createdTimestamp - a.createdTimestamp);
+  const isPremium = user.subscriptionStatus === 'PREMIUM';
 
   return (
     <div className="flex-1 overflow-y-auto px-6 py-6 bg-slate-50">
@@ -48,6 +50,9 @@ export function HistoryView({ user }: { user: User }) {
               </div>
             </div>
           ))}
+
+          {/* Strategic Placement B: Task history banner at bottom */}
+          <AdBanner isPremium={isPremium} placement="history" className="mt-6 mb-2" />
         </div>
       )}
     </div>

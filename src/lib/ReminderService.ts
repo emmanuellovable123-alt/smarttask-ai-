@@ -23,6 +23,53 @@ const AndroidWrapper = {
   get isAvailable() {
     return typeof window !== 'undefined' && (window as any).AndroidAlarmManager !== undefined;
   },
+  canScheduleExactAlarms(): boolean {
+    if (this.isAvailable && typeof (window as any).AndroidAlarmManager.canScheduleExactAlarm === 'function') {
+      try {
+        return !!(window as any).AndroidAlarmManager.canScheduleExactAlarm();
+      } catch (e) {
+        console.warn('Error checking exact alarm permission:', e);
+      }
+    }
+    return true; // Web or not applicable
+  },
+  openExactAlarmSettings() {
+    if (this.isAvailable && typeof (window as any).AndroidAlarmManager.openExactAlarmSettings === 'function') {
+      try {
+        (window as any).AndroidAlarmManager.openExactAlarmSettings();
+      } catch (e) {
+        console.error('Error opening exact alarm settings:', e);
+      }
+    }
+  },
+  openNotificationSettings() {
+    if (this.isAvailable && typeof (window as any).AndroidAlarmManager.openNotificationSettings === 'function') {
+      try {
+        (window as any).AndroidAlarmManager.openNotificationSettings();
+      } catch (e) {
+        console.error('Error opening notification settings:', e);
+      }
+    }
+  },
+  isBatteryOptimizationIgnored(): boolean {
+    if (this.isAvailable && typeof (window as any).AndroidAlarmManager.isBatteryOptimizationIgnored === 'function') {
+      try {
+        return !!(window as any).AndroidAlarmManager.isBatteryOptimizationIgnored();
+      } catch (e) {
+        console.warn('Error checking battery optimization:', e);
+      }
+    }
+    return true;
+  },
+  requestIgnoreBatteryOptimization() {
+    if (this.isAvailable && typeof (window as any).AndroidAlarmManager.requestIgnoreBatteryOptimization === 'function') {
+      try {
+        (window as any).AndroidAlarmManager.requestIgnoreBatteryOptimization();
+      } catch (e) {
+        console.error('Error requesting battery optimization exemption:', e);
+      }
+    }
+  },
   scheduleAlarm(id: string, timeMs: number, title: string, message: string) {
     if (this.isAvailable) {
       const maybePromise = (window as any).AndroidAlarmManager.scheduleAlarm(id, timeMs, title, message);
@@ -43,10 +90,10 @@ const AndroidWrapper = {
     if (this.isAvailable) {
       if ((window as any).AndroidAlarmManager.syncSettings.length >= 4) {
         const maybePromise = (window as any).AndroidAlarmManager.syncSettings(soundType, volume, customFileName || '', vibrate);
-      if (maybePromise && typeof maybePromise.catch === 'function') maybePromise.catch((e: any) => console.error(e));
+        if (maybePromise && typeof maybePromise.catch === 'function') maybePromise.catch((e: any) => console.error(e));
       } else {
         const maybePromise = (window as any).AndroidAlarmManager.syncSettings(soundType, volume, customFileName || '');
-      if (maybePromise && typeof maybePromise.catch === 'function') maybePromise.catch((e: any) => console.error(e));
+        if (maybePromise && typeof maybePromise.catch === 'function') maybePromise.catch((e: any) => console.error(e));
       }
     }
   },
@@ -176,6 +223,30 @@ export const ReminderService = {
     if (AndroidWrapper.isAvailable) {
       AndroidWrapper.stopAlarm();
     }
+  },
+
+  isNativeAndroid(): boolean {
+    return AndroidWrapper.isAvailable;
+  },
+
+  canScheduleExactAlarms(): boolean {
+    return AndroidWrapper.canScheduleExactAlarms();
+  },
+
+  openExactAlarmSettings() {
+    AndroidWrapper.openExactAlarmSettings();
+  },
+
+  openNotificationSettings() {
+    AndroidWrapper.openNotificationSettings();
+  },
+
+  isBatteryOptimizationIgnored(): boolean {
+    return AndroidWrapper.isBatteryOptimizationIgnored();
+  },
+
+  requestIgnoreBatteryOptimization() {
+    AndroidWrapper.requestIgnoreBatteryOptimization();
   },
 
   getScheduledReminders(): ScheduledReminder[] {

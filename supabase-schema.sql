@@ -30,6 +30,21 @@ CREATE TABLE profiles (
   subscription_provider TEXT,
   subscription_id TEXT,
   subscription_expires_at TIMESTAMPTZ,
+  
+  -- Phase 5B: Meet Profile Foundation
+  profile_photo_url TEXT,
+  marital_status TEXT CHECK (marital_status IN ('Single', 'Married')),
+  phone_number TEXT,
+  phone_verified BOOLEAN DEFAULT FALSE,
+  meet_setup_completed BOOLEAN DEFAULT FALSE,
+  meet_enabled BOOLEAN DEFAULT FALSE,
+  city TEXT,
+  location_permission_status TEXT DEFAULT 'prompt',
+  private_latitude DOUBLE PRECISION,
+  private_longitude DOUBLE PRECISION,
+  last_seen_at TIMESTAMPTZ,
+  is_online BOOLEAN DEFAULT FALSE,
+  
   created_at TIMESTAMPTZ DEFAULT NOW(),
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -38,6 +53,42 @@ ALTER TABLE profiles ENABLE ROW LEVEL SECURITY;
 CREATE POLICY "Users can view own profile" ON profiles FOR SELECT USING (auth.uid() = id);
 CREATE POLICY "Users can update own profile" ON profiles FOR UPDATE USING (auth.uid() = id);
 CREATE POLICY "Users can insert own profile" ON profiles FOR INSERT WITH CHECK (auth.uid() = id);
+
+-- MEET PHONE VERIFICATIONS TABLE
+CREATE TABLE meet_phone_verifications (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID REFERENCES profiles(id) NOT NULL,
+  phone_number TEXT NOT NULL,
+  code TEXT NOT NULL,
+  expires_at TIMESTAMPTZ NOT NULL,
+  verified BOOLEAN DEFAULT FALSE,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+ALTER TABLE meet_phone_verifications ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Users manage own phone verifications" ON meet_phone_verifications 
+  FOR ALL USING (auth.uid() = user_id);
+
+-- SECURE PUBLIC MEET PROFILES VIEW (Phase 5B Privacy Foundation)
+-- Strictly excludes phone numbers and private coordinates!
+-- Strictly excludes under-18 users and meet-disabled users!
+CREATE VIEW public_meet_profiles AS
+SELECT 
+  p.id,
+  p.name,
+  p.profile_photo_url,
+  p.marital_status,
+  p.country,
+  p.city,
+  p.last_seen_at,
+  p.is_online
+FROM profiles p
+WHERE 
+  p.meet_setup_completed = TRUE 
+  AND p.meet_enabled = TRUE 
+  AND p.phone_verified = TRUE
+  AND p.age IS NOT NULL 
+  AND CAST(NULLIF(regexp_replace(p.age, '\D', '', 'g'), '') AS INTEGER) >= 18;
 
 -- TASKS
 CREATE TABLE tasks (

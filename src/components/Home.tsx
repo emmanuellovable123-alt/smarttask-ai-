@@ -2,13 +2,19 @@ import React, { useState, useEffect } from 'react';
 import { User, Task } from '../types';
 import { useTasks } from '../lib/TaskContext';
 import { useAdManager } from '../lib/AdContext';
-import { Mic, PenSquare, LogOut, CheckCircle2, Circle, MoreVertical, Trash, Edit2 } from 'lucide-react';
+import { Mic, PenSquare, LogOut, CheckCircle2, Circle, MoreVertical, Trash, Edit2, Users } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { ManualTaskModal } from './ManualTaskModal';
 import { VoiceTaskModal } from './VoiceTaskModal';
+import { MeetSuggestionModal } from './meet/MeetSuggestionModal';
+import { MeetSetupModal } from './meet/MeetSetupModal';
+import { MeetPeopleModal } from './meet/MeetPeopleModal';
+import { Under18BlockedModal } from './meet/Under18BlockedModal';
+import { canUseMeet, isAdultUser } from '../lib/meetEligibility';
 import { parseTaskDateTime, getNow } from '../lib/dateUtils';
+import { AdBanner } from './AdBanner';
 
-export function Home({ user, onLogout }: { user: User, onLogout: () => void }) {
+export function Home({ user, onLogout, onUpdateUser }: { user: User, onLogout: () => void, onUpdateUser?: (u: User) => void }) {
   const { tasks, updateTask, saveTask } = useTasks();
   const { showAd } = useAdManager();
   
@@ -17,6 +23,12 @@ export function Home({ user, onLogout }: { user: User, onLogout: () => void }) {
   const [showVoiceModal, setShowVoiceModal] = useState(false);
   const [editingTask, setEditingTask] = useState<Task | null>(null);
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
+  
+  // Phase 5B: Meet Modal States
+  const [showMeetSuggestion, setShowMeetSuggestion] = useState(false);
+  const [showMeetSetup, setShowMeetSetup] = useState(false);
+  const [showMeetPeople, setShowMeetPeople] = useState(false);
+  const [showUnder18Blocked, setShowUnder18Blocked] = useState(false);
   
   const [now, setNow] = useState(getNow());
 
@@ -27,6 +39,21 @@ export function Home({ user, onLogout }: { user: User, onLogout: () => void }) {
     const timer = setInterval(() => setNow(getNow()), 60000); // update every minute for overdue check
     return () => clearInterval(timer);
   }, [tasks]);
+
+  // Phase 6: Sync user task categories to backend for privacy-safe Meet similarity matching
+  useEffect(() => {
+    if (user && canUseMeet(user) && user.meetSetupCompleted && tasks.length > 0) {
+      fetch('/api/meet/sync-tasks', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userId: user.id,
+          userAge: user.age,
+          tasks: tasks.map(t => ({ taskText: t.taskText }))
+        })
+      }).catch(err => console.warn('Background meet task sync error:', err));
+    }
+  }, [tasks, user.id, user.age, user.meetSetupCompleted]);
 
   const toggleTaskStatus = async (task: Task) => {
     try {
@@ -89,6 +116,12 @@ export function Home({ user, onLogout }: { user: User, onLogout: () => void }) {
       // After task is successfully saved, show configured ad for free users (Task Ad Flow)
       if (user.subscriptionStatus !== 'PREMIUM') {
          await showAd('interstitial');
+      }
+
+      // Phase 5B: TASK-SUBMISSION MEET SUGGESTION
+      // After an eligible adult successfully confirms and saves a task, display a Meet suggestion.
+      if (canUseMeet(user)) {
+        setShowMeetSuggestion(true);
       }
     } catch (err) {
       console.error('Error handling task saved:', err);
@@ -205,6 +238,25 @@ export function Home({ user, onLogout }: { user: User, onLogout: () => void }) {
             What do you want to<br/>accomplish today?
           </h1>
         </div>
+
+        {/* Phase 5B: Adult-Only Meet Entry Button (Never shown to under-18 users) */}
+        {canUseMeet(user) && (
+          <button
+            id="header-meet-btn"
+            onClick={() => {
+              if (user.meetSetupCompleted) {
+                setShowMeetPeople(true);
+              } else {
+                setShowMeetSetup(true);
+              }
+            }}
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-50 hover:bg-blue-100 active:bg-blue-200 text-blue-700 rounded-xl text-xs font-semibold border border-blue-200 transition-colors shadow-xs"
+            title="Meet people with similar tasks"
+          >
+            <Users className="w-3.5 h-3.5" />
+            <span>Meet</span>
+          </button>
+        )}
       </div>
 
       {/* Main Content */}
@@ -270,6 +322,9 @@ export function Home({ user, onLogout }: { user: User, onLogout: () => void }) {
           </div>
         )}
 
+        {/* Strategic Placement A: Main dashboard small banner below task content */}
+        <AdBanner isPremium={user.subscriptionStatus === 'PREMIUM'} placement="dashboard" className="mt-6 mb-2" />
+
         <div className="mt-8 flex justify-center">
           <button
             onClick={scheduleTestReminder}
@@ -298,6 +353,51 @@ export function Home({ user, onLogout }: { user: User, onLogout: () => void }) {
           onClose={() => setShowVoiceModal(false)} 
           onSaved={handleTaskSaved} 
         />
+      )}
+
+      {/* Phase 5B: Meet Feature Modals */}
+      <MeetSuggestionModal
+        user={user}
+        isOpen={showMeetSuggestion}
+        onClose={() => setShowMeetSuggestion(false)}
+        onOpenMeet={() => {
+          setShowMeetSuggestion(false);
+          if (user.meetSetupCompleted) {
+            setShowMeetPeople(true);
+          } else {
+            setShowMeetSetup(true);
+          }
+        }}
+      />
+
+      {showMeetSetup && (
+        <MeetSetupModal
+          user={user}
+          onClose={() => setShowMeetSetup(false)}
+          onSetupComplete={(updatedUser) => {
+            setShowMeetSetup(false);
+            if (onUpdateUser) onUpdateUser(updatedUser);
+            setShowMeetPeople(true);
+          }}
+          onBlockedUnder18={() => {
+            setShowMeetSetup(false);
+            setShowUnder18Blocked(true);
+          }}
+        />
+      )}
+
+      {showMeetPeople && (
+        <MeetPeopleModal
+          user={user}
+          onClose={() => setShowMeetPeople(false)}
+          onUpdateUser={(updatedUser) => {
+            if (onUpdateUser) onUpdateUser(updatedUser);
+          }}
+        />
+      )}
+
+      {showUnder18Blocked && (
+        <Under18BlockedModal onClose={() => setShowUnder18Blocked(false)} />
       )}
     </div>
   );

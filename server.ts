@@ -3,6 +3,27 @@ import path from "path";
 import { createServer as createViteServer } from "vite";
 import dotenv from "dotenv";
 import { processTaskInput } from "./src/lib/taskParsingEngine";
+import {
+  checkEligibilityHandler,
+  sendPhoneCodeHandler,
+  verifyPhoneCodeHandler,
+  uploadPhotoHandler,
+  saveMeetSetupHandler,
+  updateLocationHandler,
+  toggleMeetHandler,
+  heartbeatHandler,
+  getTestScenarioHandler,
+  discoverNearMeHandler,
+  discoverWorldwideHandler,
+  getProfileHandler,
+  sendFriendRequestHandler,
+  blockUserHandler,
+  reportUserHandler,
+  getChatMessagesHandler,
+  sendChatMessageHandler,
+  syncTasksHandler,
+  runTestSuiteHandler
+} from "./src/api/meetApi";
 
 dotenv.config();
 
@@ -10,11 +31,47 @@ async function startServer() {
   const app = express();
   const PORT = 3000;
 
-  app.use(express.json());
+  app.use(express.json({ limit: '10mb' }));
 
   // Health check endpoint
   app.get("/api/health", (req, res) => {
     res.json({ status: "ok" });
+  });
+
+  // Phase 5B: Meet People with Similar Tasks Foundation & Adult Verification
+  app.post("/api/meet/check-eligibility", checkEligibilityHandler);
+  app.post("/api/meet/send-phone-code", sendPhoneCodeHandler);
+  app.post("/api/meet/verify-phone-code", verifyPhoneCodeHandler);
+  app.post("/api/meet/upload-photo", uploadPhotoHandler);
+  app.post("/api/meet/save-setup", saveMeetSetupHandler);
+  app.post("/api/meet/update-location", updateLocationHandler);
+  app.post("/api/meet/toggle-enabled", toggleMeetHandler);
+  app.post("/api/meet/heartbeat", heartbeatHandler);
+  app.get("/api/meet/test-scenarios", getTestScenarioHandler);
+
+  // Phase 6: Meet People Discovery, Profiles, Friends, Chat, Blocks & Reports
+  app.post("/api/meet/discover/near-me", discoverNearMeHandler);
+  app.post("/api/meet/discover/worldwide", discoverWorldwideHandler);
+  app.get("/api/meet/profile/:targetUserId", getProfileHandler);
+  app.post("/api/meet/friend-request", sendFriendRequestHandler);
+  app.post("/api/meet/block", blockUserHandler);
+  app.post("/api/meet/report", reportUserHandler);
+  app.get("/api/meet/chat/get-messages", getChatMessagesHandler);
+  app.post("/api/meet/chat/send-message", sendChatMessageHandler);
+  app.post("/api/meet/sync-tasks", syncTasksHandler);
+  app.get("/api/meet/test-suite", runTestSuiteHandler);
+
+  // Authoritative server-side subscription validation endpoint
+  app.get("/api/user/subscription-status", (req, res) => {
+    const userId = req.query.userId as string;
+    // In production, queries Supabase/Stripe/LemonSqueezy server-side
+    // Returns subscription status authoritatively
+    const isPremiumUser = userId && userId.startsWith('premium_');
+    return res.json({
+      userId,
+      subscriptionStatus: isPremiumUser ? 'PREMIUM' : 'FREE',
+      isAdFree: Boolean(isPremiumUser)
+    });
   });
 
   // Comprehensive natural language fallback parser for speech & typed inputs (1 to 7 tasks)

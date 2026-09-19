@@ -1,8 +1,11 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { User } from '../types';
-import { LogOut, Bell, CalendarClock, Volume2, Music, Upload, Play, Square } from 'lucide-react';
+import { LogOut, Bell, CalendarClock, Volume2, Music, Upload, Play, Square, Smartphone, ShieldCheck, AlertCircle, Info, Zap, Users, Eye, EyeOff } from 'lucide-react';
 import { supabase, hasSupabaseKeys } from '../lib/supabase';
 import { saveCustomAudio, getCustomAudioName, playAlarmSound, stopAudio } from '../lib/audioManager';
+import { ReminderService } from '../lib/ReminderService';
+import { canUseMeet } from '../lib/meetEligibility';
+import { AdBanner } from './AdBanner';
 
 export function SettingsView({ user, onLogout, onUpdateUser }: { user: User, onLogout: () => void, onUpdateUser: (u: User) => void }) {
   const [soundType, setSoundType] = useState(user.alarmSoundType || 'native');
@@ -94,6 +97,7 @@ export function SettingsView({ user, onLogout, onUpdateUser }: { user: User, onL
         alarmVibrationEnabled: enabled
       };
       await onUpdateUser(updatedUser);
+      ReminderService.syncAlarmSettings(soundType, volume, enabled).catch(e => console.warn(e));
     } catch (err) {
       console.error(err);
     }
@@ -111,6 +115,9 @@ export function SettingsView({ user, onLogout, onUpdateUser }: { user: User, onL
       
       // Save to App state and localStorage
       await onUpdateUser(updatedUser);
+      
+      // Sync to Native Android wrapper if available
+      ReminderService.syncAlarmSettings(soundType, volume, vibrationEnabled).catch(e => console.warn(e));
       
       // Attempt Supabase save
       if (hasSupabaseKeys) {
@@ -303,7 +310,7 @@ export function SettingsView({ user, onLogout, onUpdateUser }: { user: User, onL
               </div>
               <button 
                 onClick={handleRequestNotification}
-                className="text-sm font-bold text-blue-600 bg-blue-50 px-3 py-1.5 rounded-lg hover:bg-blue-100"
+                className="text-sm font-bold text-blue-600 bg-blue-50 px-3 py-1.5 rounded-lg hover:bg-blue-100 cursor-pointer"
               >
                 Configure
               </button>
@@ -311,14 +318,143 @@ export function SettingsView({ user, onLogout, onUpdateUser }: { user: User, onL
             
           </div>
         </div>
+
+        {/* Native Android Alarm Engine & Permissions Status */}
+        <div>
+          <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3 ml-1">Native Alarm Reliability</h3>
+          <div className="bg-white rounded-2xl border border-slate-100 overflow-hidden shadow-sm p-4 space-y-4">
+            <div className="flex items-start gap-3">
+              <div className={`p-2 rounded-lg ${ReminderService.isNativeAndroid() ? 'bg-emerald-50 text-emerald-600' : 'bg-amber-50 text-amber-600'}`}>
+                <Smartphone className="w-5 h-5" />
+              </div>
+              <div className="flex-1">
+                <div className="flex items-center justify-between">
+                  <p className="font-semibold text-slate-900">Execution Layer</p>
+                  <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${ReminderService.isNativeAndroid() ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>
+                    {ReminderService.isNativeAndroid() ? 'Native Android' : 'Web Browser'}
+                  </span>
+                </div>
+                <p className="text-xs text-slate-500 mt-1 leading-relaxed">
+                  {ReminderService.isNativeAndroid()
+                    ? 'Connected to native Android AlarmManager.setAlarmClock() with boot recovery and full-screen lockscreen capability.'
+                    : 'Running in web environment using browser Web Audio & Notification APIs. On Android app builds, native AlarmManager is authoritative.'}
+                </p>
+              </div>
+            </div>
+
+            {ReminderService.isNativeAndroid() && (
+              <div className="border-t border-slate-100 pt-3 space-y-3">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="font-medium text-slate-700">Exact Alarm Permission (Android 12+)</span>
+                  <button
+                    onClick={() => ReminderService.openExactAlarmSettings()}
+                    className="text-indigo-600 font-bold hover:underline"
+                  >
+                    Check / Enable
+                  </button>
+                </div>
+                <div className="flex items-center justify-between text-xs">
+                  <span className="font-medium text-slate-700">Battery Optimization (Doze Mode)</span>
+                  <button
+                    onClick={() => ReminderService.requestIgnoreBatteryOptimization()}
+                    className="text-indigo-600 font-bold hover:underline"
+                  >
+                    Unrestricted Battery
+                  </button>
+                </div>
+              </div>
+            )}
+
+            <div className="bg-slate-50 rounded-xl p-3 border border-slate-100 flex items-start gap-2.5 text-xs text-slate-600">
+              <Info className="w-4 h-4 text-slate-400 flex-shrink-0 mt-0.5" />
+              <div className="space-y-1">
+                <p className="font-semibold text-slate-800">Device Power Note</p>
+                <p className="text-slate-500 leading-relaxed">
+                  Alarms ring when the app is closed, in the background, or when the screen is locked, and restore after reboot. Like all third-party apps, alarms require the device to be powered ON.
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Phase 5B: Meet Feature Settings (Strictly for adults who have completed setup) */}
+        {canUseMeet(user) && user.meetSetupCompleted && (
+          <div className="bg-white rounded-2xl p-6 border border-slate-100 shadow-sm space-y-4">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-blue-50 text-blue-600 flex items-center justify-center flex-shrink-0">
+                <Users className="w-5 h-5" />
+              </div>
+              <div className="flex-1">
+                <h3 className="font-bold text-slate-900 text-sm">Meet People Settings</h3>
+                <p className="text-xs text-slate-500">Manage discovery visibility and profile status</p>
+              </div>
+              <span className="text-[10px] font-bold uppercase tracking-wider bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded-full">
+                Active
+              </span>
+            </div>
+
+            <div className="pt-2 border-t border-slate-100 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                {user.meetEnabled !== false ? (
+                  <Eye className="w-4 h-4 text-emerald-600" />
+                ) : (
+                  <EyeOff className="w-4 h-4 text-slate-400" />
+                )}
+                <div>
+                  <span className="text-xs font-bold text-slate-800 block">
+                    Allow Me to Appear in Meet
+                  </span>
+                  <span className="text-[11px] text-slate-500">
+                    {user.meetEnabled !== false 
+                      ? 'Visible to other users running tasks' 
+                      : 'Hidden from discovery; your alarms work normally'}
+                  </span>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                id="settings-toggle-meet-btn"
+                onClick={async () => {
+                  const nextState = user.meetEnabled === false;
+                  try {
+                    await fetch('/api/meet/toggle-enabled', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({
+                        userId: user.id,
+                        age: user.age,
+                        enabled: nextState
+                      })
+                    });
+                    onUpdateUser({ ...user, meetEnabled: nextState });
+                  } catch (e) {
+                    console.error('Failed to toggle Meet in settings', e);
+                  }
+                }}
+                className={`w-12 h-6 flex items-center rounded-full p-1 transition-colors ${
+                  user.meetEnabled !== false ? 'bg-blue-600 justify-end' : 'bg-slate-300 justify-start'
+                }`}
+                aria-label="Toggle Meet Visibility"
+              >
+                <div className="w-4 h-4 bg-white rounded-full shadow-xs" />
+              </button>
+            </div>
+          </div>
+        )}
         
-        <button 
-          onClick={onLogout}
-          className="w-full bg-white border border-red-100 text-red-600 font-bold py-4 rounded-2xl flex items-center justify-center gap-2 hover:bg-red-50"
-        >
-          <LogOut className="w-5 h-5" />
-          Sign Out
-        </button>
+        {/* Strategic Placement E: Non-intrusive Settings banner */}
+        <AdBanner isPremium={user.subscriptionStatus === 'PREMIUM'} placement="settings" className="my-2" />
+
+        <div className="pt-2">
+          <button 
+            onClick={onLogout}
+            className="w-full bg-white border border-red-100 text-red-600 font-bold py-4 rounded-2xl flex items-center justify-center gap-2 hover:bg-red-50 transition-colors"
+          >
+            <LogOut className="w-5 h-5" />
+            Sign Out
+          </button>
+        </div>
       </div>
     </div>
   );

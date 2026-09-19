@@ -1,6 +1,6 @@
 {
   "name": "Daily TASK AI",
   "description": "Speak it. Schedule it. Get it done.",
-  "requestFramePermissions": ["microphone"],
+  "requestFramePermissions": ["microphone", "geolocation"],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

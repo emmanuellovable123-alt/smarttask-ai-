@@ -3,6 +3,7 @@ import { User, Task } from '../types';
 import { useTasks } from '../lib/TaskContext';
 import { parseTaskDateTime } from '../lib/dateUtils';
 import { CheckCircle2, XCircle, Calendar, Flame } from 'lucide-react';
+import { AdBanner } from './AdBanner';
 
 export function ReportsView({ user }: { user: User }) {
   const [selectedDate, setSelectedDate] = useState<string>('');
@@ -163,6 +164,9 @@ export function ReportsView({ user }: { user: User }) {
             </div>
           </div>
         )}
+
+        {/* Strategic Placement C: Daily report banner below content */}
+        <AdBanner isPremium={user.subscriptionStatus === 'PREMIUM'} placement="reports" className="mt-8 mb-4" />
       </div>
     </div>
   );

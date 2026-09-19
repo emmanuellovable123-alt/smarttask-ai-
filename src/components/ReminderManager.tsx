@@ -5,6 +5,8 @@ import { useAdManager } from '../lib/AdContext';
 import { getNow, parseTaskDateTime } from '../lib/dateUtils';
 import { ReminderModal } from './ReminderModal';
 import { ReminderService, ScheduledReminder } from '../lib/ReminderService';
+import { store } from '../lib/store';
+import { adAnalytics } from '../lib/adAnalytics';
 
 export function ReminderManager({ userId, onTasksUpdated }: { userId: string, onTasksUpdated: () => void }) {
   const { tasks, updateTask } = useTasks();
@@ -61,6 +63,15 @@ export function ReminderManager({ userId, onTasksUpdated }: { userId: string, on
         const previouslyTriggeredStr = localStorage.getItem(`triggered_reminders_${userId}`) || '[]';
         const previouslyTriggered: string[] = JSON.parse(previouslyTriggeredStr);
 
+        // Cancel any alarms for tasks that have been removed or deleted entirely
+        const scheduledInService = ReminderService.getScheduledReminders();
+        const existingTaskIds = new Set(tasks.map(t => t.id));
+        for (const rem of scheduledInService) {
+          if (!existingTaskIds.has(rem.taskId)) {
+            ReminderService.cancelReminder(rem.taskId);
+          }
+        }
+
         for (const task of tasks) {
           if (task.status === 'Cancelled' || task.status === 'Fulfilled' || task.status === 'Not Fulfilled') {
             ReminderService.cancelReminder(task.id);
@@ -89,7 +100,7 @@ export function ReminderManager({ userId, onTasksUpdated }: { userId: string, on
                 previouslyTriggered.push(task.id);
                 localStorage.setItem(`triggered_reminders_${userId}`, JSON.stringify(previouslyTriggered));
                 
-                const updated = { ...task, alarmStatus: 'ringing' as const, alarmStartedAt: getNow() };
+                const updated = { ...task, alarmStatus: 'RINGING' as const, alarmStartedAt: getNow() };
                 updateTask(updated).catch(e => console.error("Error setting alarm to ringing", e));
                 
                 const reminder: ScheduledReminder = {
@@ -133,7 +144,8 @@ export function ReminderManager({ userId, onTasksUpdated }: { userId: string, on
     try {
       const task = tasks.find(t => t.id === taskId);
       if (task) {
-        const updated = { ...task, status: 'Fulfilled' as const, completedTimestamp: getNow(), alarmStatus: 'fulfilled' as const };
+        // Explicitly marks the task as completed/fulfilled
+        const updated = { ...task, status: 'Fulfilled' as const, completedTimestamp: getNow(), alarmStatus: 'COMPLETED' as const };
         await updateTask(updated);
         await onTasksUpdated();
       }
@@ -147,7 +159,7 @@ export function ReminderManager({ userId, onTasksUpdated }: { userId: string, on
     try {
       const task = tasks.find(t => t.id === taskId);
       if (task) {
-        const updated = { ...task, snoozedUntil: getNow() + ms, alarmStatus: 'snoozed' as const };
+        const updated = { ...task, snoozedUntil: getNow() + ms, alarmStatus: 'SNOOZED' as const };
         await updateTask(updated);
         
         const previouslyTriggeredStr = localStorage.getItem(`triggered_reminders_${userId}`) || '[]';
@@ -168,7 +180,8 @@ export function ReminderManager({ userId, onTasksUpdated }: { userId: string, on
     try {
       const task = tasks.find(t => t.id === taskId);
       if (task) {
-        const updated = { ...task, alarmStatus: 'expired' as const, alarmExpiredAt: getNow() };
+        // 5-minute timeout automatically records TIMED_OUT without marking task fulfilled
+        const updated = { ...task, alarmStatus: 'TIMED_OUT' as const, alarmExpiredAt: getNow() };
         await updateTask(updated);
         await onTasksUpdated();
       }
@@ -190,11 +203,35 @@ export function ReminderManager({ userId, onTasksUpdated }: { userId: string, on
       userId={userId}
       notificationPermission={permission}
       onAcknowledge={async () => {
+        // STOP RINGING: stops sound & vibration and records STOPPED_BY_USER without fulfilling task
         const task = tasks.find(t => t.id === activeTask.id);
         if (task) {
-          await updateTask({ ...task, alarmStatus: 'acknowledged' as const, alarmAcknowledgedAt: getNow() }).catch(e => console.error(e));
+          await updateTask({
+            ...task,
+            alarmStatus: 'STOPPED_BY_USER' as const,
+            alarmAcknowledgedAt: getNow(),
+            alarmStoppedAt: getNow()
+          }).catch(e => console.error(e));
         }
         await handleAcknowledge(activeTask.id).catch(e => console.error(e));
+
+        // AD AFTER STOP RINGING: Triggered AFTER the alarm has stopped & modal closed
+        const currentUser = store.getCurrentUser();
+        const isPremium = currentUser?.subscriptionStatus === 'PREMIUM';
+        if (!isPremium) {
+          try {
+            await showAd('interstitial', {
+              requestedEvent: 'alarm_stop_ad_requested',
+              shownEvent: 'alarm_stop_ad_shown',
+              completedEvent: 'alarm_stop_ad_completed',
+              failedEvent: 'alarm_stop_ad_failed',
+              actionId: `alarm_stop_${activeTask.id}`
+            });
+          } catch (adErr) {
+            console.error('Alarm stop ad error:', adErr);
+            adAnalytics.track('alarm_stop_ad_failed', { error: String(adErr) });
+          }
+        }
       }}
       onFulfill={() => handleFulfill(activeTask.id)}
       onSnooze={(ms) => handleSnooze(activeTask.id, ms)}
